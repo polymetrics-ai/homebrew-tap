@@ -1,7 +1,7 @@
 name: Homebrew validation
 
 on:
-  pull_request:
+  pull_request_target:
   push:
     branches:
       - main
@@ -16,19 +16,21 @@ concurrency:
 jobs:
   security-guardrails:
     name: Security guardrails
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.user.login == 'karthik-sivadas' }}
+    if: ${{ github.event_name != 'pull_request_target' || github.event.pull_request.user.login == 'karthik-sivadas' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Check out tap
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
 
       - name: Run security guardrail tests
         run: ruby test/security_guardrails_test.rb
 
   pm-source-build:
     name: PM source build (${{ matrix.label }})
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.user.login == 'karthik-sivadas' }}
+    if: ${{ github.event_name != 'pull_request_target' || github.event.pull_request.user.login == 'karthik-sivadas' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
@@ -48,6 +50,8 @@ jobs:
     steps:
       - name: Check out tap
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up Homebrew on Linux
         if: runner.os == 'Linux'

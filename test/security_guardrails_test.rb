@@ -91,12 +91,16 @@ class SecurityGuardrailsTest < Minitest::Test
     assert_match(/case "\$\{PR_NUMBER\}" in\n\s+''\|\*\[!0-9\]\*\)/, @auth_text)
   end
 
-  def test_homebrew_validation_skips_unauthorized_pull_request_code_execution_only
+  def test_homebrew_validation_uses_base_owned_pr_workflow_with_author_gate
+    assert_match(/^\s+pull_request_target:/, @homebrew_text)
+    refute_match(/^\s+pull_request:/, @homebrew_text)
     assert_includes @homebrew_text,
-                    "github.event_name != 'pull_request' || github.event.pull_request.user.login == 'karthik-sivadas'"
+                    "github.event_name != 'pull_request_target' || github.event.pull_request.user.login == 'karthik-sivadas'"
     assert_includes @homebrew_text, "Security guardrails"
     assert_includes @homebrew_text, "ruby test/security_guardrails_test.rb"
     assert_includes @homebrew_text, "PM source build (${{ matrix.label }})"
+    assert_includes @homebrew_text,
+                    "github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha"
     assert_match(/^    timeout-minutes: 60$/, @homebrew_text)
     assert_match(/^concurrency:\n  group: "homebrew-validation-\$\{\{ github\.event\.pull_request\.number \|\| github\.ref \}\}"\n  cancel-in-progress: true$/m, @homebrew_text)
   end
