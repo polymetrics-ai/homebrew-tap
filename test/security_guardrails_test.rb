@@ -4,10 +4,12 @@ require "minitest/autorun"
 require "yaml"
 
 class SecurityGuardrailsTest < Minitest::Test
-  ROOT = File.expand_path("..", __dir__)
-  AUTH_WORKFLOW = File.join(ROOT, ".github/workflows/pull-request-authorization.yml")
-  HOMEBREW_WORKFLOW = File.join(ROOT, ".github/workflows/homebrew.yml")
-  CODEOWNERS = File.join(ROOT, ".github/CODEOWNERS")
+  ROOT = File.expand_path("..", __dir__).freeze
+  AUTH_WORKFLOW = File.join(ROOT, ".github/workflows/pull-request-authorization.yml").freeze
+  HOMEBREW_WORKFLOW = File.join(ROOT, ".github/workflows/homebrew.yml").freeze
+  CODEOWNERS = File.join(ROOT, ".github/CODEOWNERS").freeze
+  AUTHORIZATION_CONCURRENCY_GROUP = 'pull-request-authorization-\$\{\{ github\.event\.pull_request\.number \}\}'
+  HOMEBREW_CONCURRENCY_GROUP = 'homebrew-validation-\$\{\{ github\.ref \}\}'
 
   FORBIDDEN_WORKFLOW_WRITE_PERMISSIONS = %w[
     actions
@@ -22,6 +24,14 @@ class SecurityGuardrailsTest < Minitest::Test
     security-events
     secrets
     statuses
+  ].freeze
+
+  ATTACKER_CONTROLLED_CONTEXTS = %w[
+    github.event.pull_request.title
+    github.event.pull_request.body
+    github.event.pull_request.head.ref
+    github.event.pull_request.head.label
+    github.head_ref
   ].freeze
 
   def setup
@@ -48,14 +58,15 @@ class SecurityGuardrailsTest < Minitest::Test
   def test_authorization_workflow_has_stable_check_and_bounded_execution
     assert_includes @auth_text, "name: PR author authorization"
     assert_match(/^    timeout-minutes: 5$/, @auth_text)
-    assert_match(/^concurrency:\n  group: "pull-request-authorization-\$\{\{ github\.event\.pull_request\.number \}\}"\n  cancel-in-progress: true$/m, @auth_text)
+    assert_concurrency_group @auth_text, AUTHORIZATION_CONCURRENCY_GROUP
   end
 
   def test_authorization_workflow_least_privilege_permissions
     assert_match(/^permissions:\n  contents: read\n  pull-requests: write\n/m, @auth_text)
 
     FORBIDDEN_WORKFLOW_WRITE_PERMISSIONS.each do |permission|
-      refute_match(/^\s+#{Regexp.escape(permission)}:\s*write\b/, @auth_text, "#{permission}: write must not be granted")
+      refute_match(/^\s+#{Regexp.escape(permission)}:\s*write\b/, @auth_text,
+                   "#{permission}: write must not be granted")
     end
   end
 
@@ -76,15 +87,7 @@ class SecurityGuardrailsTest < Minitest::Test
   end
 
   def test_authorization_shell_does_not_consume_attacker_controlled_text
-    attacker_controlled_contexts = %w[
-      github.event.pull_request.title
-      github.event.pull_request.body
-      github.event.pull_request.head.ref
-      github.event.pull_request.head.label
-      github.head_ref
-    ]
-
-    attacker_controlled_contexts.each do |context|
+    ATTACKER_CONTROLLED_CONTEXTS.each do |context|
       refute_includes @auth_text, context
     end
 
@@ -100,7 +103,7 @@ class SecurityGuardrailsTest < Minitest::Test
     assert_includes @homebrew_text, "ruby test/security_guardrails_test.rb"
     assert_includes @homebrew_text, "PM source build (${{ matrix.label }})"
     assert_match(/^    timeout-minutes: 60$/, @homebrew_text)
-    assert_match(/^concurrency:\n  group: "homebrew-validation-\$\{\{ github\.ref \}\}"\n  cancel-in-progress: true$/m, @homebrew_text)
+    assert_concurrency_group @homebrew_text, HOMEBREW_CONCURRENCY_GROUP
   end
 
   def test_all_referenced_actions_are_pinned_to_full_commit_shas
@@ -109,9 +112,15 @@ class SecurityGuardrailsTest < Minitest::Test
 
     refute_empty uses_lines
     uses_lines.each do |line|
-      assert_match(%r{uses:\s+[^\s@]+@[0-9a-f]{40}(?:\s+#.*)?$}i, line)
+      assert_match(/uses:\s+[^\s@]+@[0-9a-f]{40}(?:\s+#.*)?$/i, line)
     end
 
     assert_match(%r{uses:\s+actions/checkout@11d5960a326750d5838078e36cf38b85af677262\b}, @homebrew_text)
+  end
+
+  private
+
+  def assert_concurrency_group(workflow_text, group_pattern)
+    assert_match(/^concurrency:\n  group: "#{group_pattern}"\n  cancel-in-progress: true$/m, workflow_text)
   end
 end
