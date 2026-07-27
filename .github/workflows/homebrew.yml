@@ -9,10 +9,16 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: "homebrew-validation-${{ github.event.pull_request.number || github.ref }}"
+  cancel-in-progress: true
+
 jobs:
   pm-source-build:
     name: PM source build (${{ matrix.label }})
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.user.login == 'karthik-sivadas' }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -29,7 +35,7 @@ jobs:
 
     steps:
       - name: Check out tap
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Homebrew on Linux
         if: runner.os == 'Linux'

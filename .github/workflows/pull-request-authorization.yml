@@ -1,0 +1,60 @@
+name: Pull request authorization
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: "pull-request-authorization-${{ github.event.pull_request.number }}"
+  cancel-in-progress: true
+
+jobs:
+  authorize:
+    name: PR author authorization
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Accept captain-authored pull requests
+        if: ${{ github.event.pull_request.user.login == 'karthik-sivadas' }}
+        run: echo "Pull request author is authorized."
+
+      - name: Comment on and close unauthorized pull requests
+        if: ${{ github.event.pull_request.user.login != 'karthik-sivadas' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          case "${PR_NUMBER}" in
+            ''|*[!0-9]*)
+              echo "Invalid pull request number from GitHub event." >&2
+              exit 1
+              ;;
+          esac
+
+          body=$(cat <<'COMMENT'
+          Thank you for your interest in this public Homebrew tap.
+
+          This repository accepts pull requests authored only by `karthik-sivadas`.
+          GitHub cannot prevent public pull request creation, so unauthorized PRs are closed automatically without checking out or executing contributor code.
+
+          If you need to report a vulnerability, use the repository private vulnerability reporting workflow described in `SECURITY.md`.
+          COMMENT
+          )
+
+          gh api "repos/polymetrics-ai/homebrew-tap/pulls/${PR_NUMBER}/reviews" \
+            --method POST \
+            --field event=COMMENT \
+            --field "body=${body}"
+
+          gh api "repos/polymetrics-ai/homebrew-tap/pulls/${PR_NUMBER}" \
+            --method PATCH \
+            --field state=closed
+
+          echo "Pull request author is not authorized for this repository." >&2
+          exit 1
