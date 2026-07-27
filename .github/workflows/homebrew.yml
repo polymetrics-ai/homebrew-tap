@@ -1,18 +1,20 @@
 name: Homebrew validation
 
 on:
-  pull_request:
   push:
-    branches:
-      - main
 
 permissions:
   contents: read
+
+concurrency:
+  group: "homebrew-validation-${{ github.ref }}"
+  cancel-in-progress: true
 
 jobs:
   pm-source-build:
     name: PM source build (${{ matrix.label }})
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -29,7 +31,10 @@ jobs:
 
     steps:
       - name: Check out tap
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Run security guardrail tests
+        run: ruby test/security_guardrails_test.rb
 
       - name: Set up Homebrew on Linux
         if: runner.os == 'Linux'

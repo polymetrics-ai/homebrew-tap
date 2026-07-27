@@ -76,7 +76,8 @@ brew untap polymetrics-ai/tap
 ## Maintainers
 
 - Formula source of truth: [`Formula/pm.rb`](Formula/pm.rb)
-- Pull-request validation: [`.github/workflows/homebrew.yml`](.github/workflows/homebrew.yml)
+- Homebrew validation workflow: [`.github/workflows/homebrew.yml`](.github/workflows/homebrew.yml)
+- Contribution and vulnerability policy: [`SECURITY.md`](SECURITY.md)
 - Future formula bump procedure: [`docs/formula-bump.md`](docs/formula-bump.md)
 
 The validation workflow uses only GitHub-hosted public-repository labels:

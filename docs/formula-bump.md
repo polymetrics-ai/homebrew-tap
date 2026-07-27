@@ -56,7 +56,9 @@ validation, and do not remove checks to hide an unproven architecture.
 
 ## 4. Pull request and rollback
 
-1. Open one focused PR describing the formula update and validation results.
+1. Open one focused PR that follows the accepted contribution policy in
+   [`../SECURITY.md`](../SECURITY.md), describing the formula update and
+   validation results.
 2. Reference the relevant CLI release/process issue. Use closing keywords only
    for work fully delivered by the PR.
 3. Wait for `.github/workflows/homebrew.yml` to pass before requesting merge.
