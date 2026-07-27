@@ -47,10 +47,12 @@ jobs:
           COMMENT
           )
 
-          gh api "repos/polymetrics-ai/homebrew-tap/pulls/${PR_NUMBER}/reviews" \
+          if ! gh api "repos/polymetrics-ai/homebrew-tap/pulls/${PR_NUMBER}/reviews" \
             --method POST \
             --field event=COMMENT \
-            --field "body=${body}"
+            --field "body=${body}"; then
+            echo "Unable to add unauthorized pull request review comment; closing will continue." >&2
+          fi
 
           gh api "repos/polymetrics-ai/homebrew-tap/pulls/${PR_NUMBER}" \
             --method PATCH \

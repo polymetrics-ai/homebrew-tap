@@ -67,10 +67,11 @@ class SecurityGuardrailsTest < Minitest::Test
 
   def test_unauthorized_pull_requests_are_commented_closed_and_cannot_satisfy_check
     assert_includes @auth_text, "Comment on and close unauthorized pull requests"
-    assert_includes @auth_text, "pulls/${PR_NUMBER}/reviews"
+    assert_includes @auth_text, 'if ! gh api "repos/polymetrics-ai/homebrew-tap/pulls/${PR_NUMBER}/reviews"'
     assert_includes @auth_text, "--field event=COMMENT"
     assert_includes @auth_text, "pulls/${PR_NUMBER}"
     assert_includes @auth_text, "--field state=closed"
+    assert_includes @auth_text, "Unable to add unauthorized pull request review comment; closing will continue."
     assert_includes @auth_text, "exit 1"
   end
 
@@ -93,6 +94,8 @@ class SecurityGuardrailsTest < Minitest::Test
   def test_homebrew_validation_skips_unauthorized_pull_request_code_execution_only
     assert_includes @homebrew_text,
                     "github.event_name != 'pull_request' || github.event.pull_request.user.login == 'karthik-sivadas'"
+    assert_includes @homebrew_text, "Security guardrails"
+    assert_includes @homebrew_text, "ruby test/security_guardrails_test.rb"
     assert_includes @homebrew_text, "PM source build (${{ matrix.label }})"
     assert_match(/^    timeout-minutes: 60$/, @homebrew_text)
     assert_match(/^concurrency:\n  group: "homebrew-validation-\$\{\{ github\.event\.pull_request\.number \|\| github\.ref \}\}"\n  cancel-in-progress: true$/m, @homebrew_text)
