@@ -1,0 +1,79 @@
+name: Homebrew validation
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  pm-source-build:
+    name: PM source build (${{ matrix.label }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Linux x64 (ubuntu-latest)
+            runner: ubuntu-latest
+            documented_architecture: x64
+          - label: macOS arm64 (macos-15)
+            runner: macos-15
+            documented_architecture: arm64
+          - label: macOS Intel (macos-15-intel)
+            runner: macos-15-intel
+            documented_architecture: Intel
+
+    steps:
+      - name: Check out tap
+        uses: actions/checkout@v4
+
+      - name: Set up Homebrew on Linux
+        if: runner.os == 'Linux'
+        run: |
+          eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          {
+            echo "HOMEBREW_PREFIX=${HOMEBREW_PREFIX}"
+            echo "HOMEBREW_CELLAR=${HOMEBREW_CELLAR}"
+            echo "HOMEBREW_REPOSITORY=${HOMEBREW_REPOSITORY}"
+          } >> "${GITHUB_ENV}"
+          echo "${HOMEBREW_PREFIX}/bin" >> "${GITHUB_PATH}"
+          echo "${HOMEBREW_PREFIX}/sbin" >> "${GITHUB_PATH}"
+
+      - name: Tap checked-out repository
+        run: |
+          brew untap polymetrics-ai/tap || true
+          brew tap polymetrics-ai/tap "file://${GITHUB_WORKSPACE}"
+
+      - name: Show runner and Homebrew context
+        run: |
+          echo "GitHub-hosted runner label: ${{ matrix.runner }}"
+          echo "Documented architecture: ${{ matrix.documented_architecture }}"
+          uname -a
+          uname -m
+          brew --version
+          brew config
+
+      - name: Audit formula
+        run: brew audit --new --strict --online --formula polymetrics-ai/tap/pm
+
+      - name: Check style
+        run: brew style --formula polymetrics-ai/tap/pm
+
+      - name: Install PM from source
+        run: brew install --build-from-source polymetrics-ai/tap/pm
+
+      - name: Test PM formula
+        run: brew test polymetrics-ai/tap/pm
+
+      - name: Verify installed PM commands
+        run: |
+          pm version --json
+          pm connectors inspect sample --json
+
+      - name: Uninstall PM
+        if: always()
+        run: brew uninstall --formula pm || true
