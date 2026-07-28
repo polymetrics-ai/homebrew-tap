@@ -1,0 +1,10 @@
+{
+  "schema": "pm-homebrew-formula-metadata/v1",
+  "source_repo": "polymetrics-ai/cli",
+  "tag": "v0.1.1",
+  "version": "0.1.1",
+  "source_url": "https://github.com/polymetrics-ai/cli/archive/refs/tags/v0.1.1.tar.gz",
+  "source_sha256": "09e94f2a6524d881aed328c30b27f9ff39e40975fea67b4a540ea76a8ef4fa00",
+  "commit": "4a30b802d5b9ab7188181eacac1812cceed0e543",
+  "build_date": "2026-07-28T12:29:42Z"
+}
