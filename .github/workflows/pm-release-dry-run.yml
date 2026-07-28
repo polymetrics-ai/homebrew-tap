@@ -1,0 +1,107 @@
+name: PM release dry-run verification
+
+on:
+  workflow_dispatch:
+    inputs:
+      dispatch_schema:
+        description: Dry-run input schema. Keep the default unless the workflow has been upgraded.
+        required: true
+        type: string
+        default: pm-homebrew-release-dry-run/v1
+      source_repo:
+        description: Upstream PM repository. Must be polymetrics-ai/cli.
+        required: true
+        type: string
+        default: polymetrics-ai/cli
+      version:
+        description: Stable PM version without a leading v, for example 0.1.1.
+        required: true
+        type: string
+      release_id:
+        description: Optional GitHub Release id to cross-check against the tag release.
+        required: false
+        type: string
+      source_run_id:
+        description: Optional upstream Release workflow run id expected in certificate evidence.
+        required: false
+        type: string
+      target_commitish_policy:
+        description: Ignore target_commitish by default; require a matching full SHA only for strict audits.
+        required: true
+        type: choice
+        default: ignore
+        options:
+          - ignore
+          - require-full-sha
+
+permissions:
+  attestations: read
+  contents: read
+
+concurrency:
+  group: "pm-release-dry-run-${{ inputs.version }}"
+  cancel-in-progress: false
+
+jobs:
+  validate-release:
+    name: Validate PM release without mutation
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      attestations: read
+      contents: read
+
+    steps:
+      - name: Check out tap
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Verify released PM version without mutation
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PM_DISPATCH_SCHEMA: ${{ inputs.dispatch_schema }}
+          PM_SOURCE_REPO: ${{ inputs.source_repo }}
+          PM_VERSION: ${{ inputs.version }}
+          PM_RELEASE_ID: ${{ inputs.release_id }}
+          PM_SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          PM_TARGET_COMMITISH_POLICY: ${{ inputs.target_commitish_policy }}
+        run: |
+          set -euo pipefail
+
+          metadata="${RUNNER_TEMP}/pm-formula-metadata.json"
+          verification="${RUNNER_TEMP}/pm-release-verification.json"
+
+          ruby scripts/pm_release_verifier.rb verify \
+            --dispatch-schema "${PM_DISPATCH_SCHEMA}" \
+            --source-repo "${PM_SOURCE_REPO}" \
+            --version "${PM_VERSION}" \
+            --release-id "${PM_RELEASE_ID}" \
+            --source-run-id "${PM_SOURCE_RUN_ID}" \
+            --target-commitish-policy "${PM_TARGET_COMMITISH_POLICY}" \
+            --metadata-out "${metadata}" \
+            --verification-out "${verification}" \
+            --formula Formula/pm.rb \
+            --readme README.md
+
+          if ! git diff --quiet --exit-code || ! git diff --cached --quiet --exit-code; then
+            git status --short
+            echo "Dry-run verifier mutated tracked repository files." >&2
+            exit 1
+          fi
+
+          {
+            echo "## PM release dry-run verification"
+            echo
+            echo "No branch, commit, push, pull request, release, tag, formula, or README mutation was performed."
+            echo
+            echo "### Verification summary"
+            echo
+            echo '```json'
+            ruby -rjson -e 'puts JSON.pretty_generate(JSON.parse(File.read(ARGV.fetch(0))))' "${verification}"
+            echo '```'
+            echo
+            echo "### Deterministic formula metadata"
+            echo
+            echo '```json'
+            ruby -rjson -e 'puts JSON.pretty_generate(JSON.parse(File.read(ARGV.fetch(0))))' "${metadata}"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"

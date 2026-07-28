@@ -4,6 +4,14 @@ Use this checklist for future immutable PM tags. Do not use moving branches,
 unchecked archives, direct release assets, bottles, or provenance changes unless
 that work has been separately approved.
 
+## Read-only release dry-run
+
+Before any automated formula branch or PR mutation, run the tap-owned manual
+`PM release dry-run verification` workflow. It independently verifies the PM
+release, tag, source archive, release assets, checksums, Cosign evidence, GitHub
+artifact attestations, and deterministic Formula/README metadata without writing
+tracked files. See [`pm-release-dry-run.md`](pm-release-dry-run.md).
+
 ## Preferred deterministic tooling
 
 Use the tap-owned Ruby helper before opening a formula bump PR. Keep metadata and
