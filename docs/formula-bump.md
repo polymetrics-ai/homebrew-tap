@@ -7,10 +7,9 @@ that work has been separately approved.
 ## Read-only release dry-run
 
 Before any automated formula branch or PR mutation, run the tap-owned manual
-`PM release dry-run verification` workflow. It independently verifies the PM
-release, tag, source archive, release assets, checksums, Cosign evidence, GitHub
-artifact attestations, and deterministic Formula/README metadata without writing
-tracked files. See [`pm-release-dry-run.md`](pm-release-dry-run.md).
+`PM release dry-run verification` workflow documented in
+[`pm-release-dry-run.md`](pm-release-dry-run.md). Treat a successful dry-run as a
+prerequisite for the later formula-update branch/PR slice.
 
 ## Preferred deterministic tooling
 

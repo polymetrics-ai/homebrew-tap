@@ -38,8 +38,14 @@ class PMReleaseVerifierTest < Minitest::Test
       assert_equal 22, summary.dig("release_assets", "asset_count")
       assert_equal 11, summary.dig("release_assets", "signed_subject_count")
       signed_names = PMReleaseVerifier.signed_subject_names(VALID_METADATA.fetch("version"))
-      assert_equal signed_names, fixture.external_verifier.cosign_requests.map { |request| request.fetch(:expected_name) }
-      assert_equal signed_names, fixture.external_verifier.attestation_requests.map { |request| request.fetch(:expected_name) }
+      assert_equal(
+        signed_names,
+        fixture.external_verifier.cosign_requests.map { |request| request.fetch(:expected_name) },
+      )
+      assert_equal(
+        signed_names,
+        fixture.external_verifier.attestation_requests.map { |request| request.fetch(:expected_name) },
+      )
       assert_equal PMFormulaBump.stable_json(VALID_METADATA), File.read(fixture.metadata_path)
       assert_equal "", git(repo, "status", "--porcelain=v1", "--untracked-files=no")
     end
@@ -410,7 +416,7 @@ class PMReleaseVerifierTest < Minitest::Test
       add_claim(cert, :repository, @cert_repo)
       add_claim(cert, :ref, "refs/heads/main")
       add_claim(cert, :run_url, "https://github.com/#{@cert_repo}/actions/runs/#{VALID_SOURCE_RUN_ID}/attempts/1")
-      cert.sign(key, OpenSSL::Digest::SHA256.new)
+      cert.sign(key, OpenSSL::Digest.new("SHA256"))
       [key, cert]
     end
 
@@ -427,7 +433,7 @@ class PMReleaseVerifierTest < Minitest::Test
 
     def cosign_bundle_for(name, digest)
       bytes = @asset_bytes.fetch(name)
-      signature = @key.sign(OpenSSL::Digest::SHA256.new, bytes)
+      signature = @key.sign(OpenSSL::Digest.new("SHA256"), bytes)
       signature_b64 = Base64.strict_encode64(signature)
       rekor_body = {
         "apiVersion" => "0.0.1",
@@ -457,7 +463,7 @@ class PMReleaseVerifierTest < Minitest::Test
       }
       payload = JSON.generate(@attestation_statement)
       payload_type = PMReleaseVerifier::ATTESTATION_PAYLOAD_TYPE
-      signature = @key.sign(OpenSSL::Digest::SHA256.new, PMReleaseVerifier.dsse_pae(payload_type, payload))
+      signature = @key.sign(OpenSSL::Digest.new("SHA256"), PMReleaseVerifier.dsse_pae(payload_type, payload))
       {
         "mediaType" => PMReleaseVerifier::ATTESTATION_BUNDLE_MEDIA_TYPE,
         "verificationMaterial" => {
