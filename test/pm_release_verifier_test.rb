@@ -37,6 +37,9 @@ class PMReleaseVerifierTest < Minitest::Test
       assert_equal "dry-run: Formula/pm.rb and README.md already match metadata", summary.fetch("formula_dry_run")
       assert_equal 22, summary.dig("release_assets", "asset_count")
       assert_equal 11, summary.dig("release_assets", "signed_subject_count")
+      signed_names = PMReleaseVerifier.signed_subject_names(VALID_METADATA.fetch("version"))
+      assert_equal signed_names, fixture.external_verifier.cosign_requests.map { |request| request.fetch(:expected_name) }
+      assert_equal signed_names, fixture.external_verifier.attestation_requests.map { |request| request.fetch(:expected_name) }
       assert_equal PMFormulaBump.stable_json(VALID_METADATA), File.read(fixture.metadata_path)
       assert_equal "", git(repo, "status", "--porcelain=v1", "--untracked-files=no")
     end
@@ -135,16 +138,58 @@ class PMReleaseVerifierTest < Minitest::Test
       fixture.corrupt_cosign_signature("pm_0.1.1_darwin_amd64.tar.gz")
 
       error = assert_raises(PMReleaseVerifier::Error) { verify(repo, fixture) }
-      assert_match(/Cosign signature for pm_0\.1\.1_darwin_amd64\.tar\.gz did not verify/, error.message)
+      assert_match(/Cosign verification rejected pm_0\.1\.1_darwin_amd64\.tar\.gz/, error.message)
+    end
+  end
+
+  def test_rejects_untrusted_cosign_evidence_even_when_certificate_claims_match
+    with_repo_fixture("current") do |repo|
+      fixture = SyntheticRelease.new
+      fixture.external_verifier.reject_cosign("checksums.txt", "untrusted Cosign bundle")
+
+      error = assert_raises(PMReleaseVerifier::Error) { verify(repo, fixture) }
+      assert_match(/untrusted Cosign bundle/, error.message)
     end
   end
 
   def test_rejects_certificate_identity_failure
     with_repo_fixture("current") do |repo|
-      fixture = SyntheticRelease.new(cert_repo: "attacker/cli")
+      fixture = SyntheticRelease.new(
+        cert_repo: "attacker/cli",
+        cert_claim_overrides: {
+          repository: PMReleaseVerifier::SOURCE_REPO,
+          run_url: "https://github.com/#{PMReleaseVerifier::SOURCE_REPO}/actions/runs/#{VALID_SOURCE_RUN_ID}/attempts/1",
+        },
+      )
 
       error = assert_raises(PMReleaseVerifier::Error) { verify(repo, fixture) }
       assert_match(/certificate subject identity is not the PM release workflow/, error.message)
+    end
+  end
+
+  def test_rejects_certificate_claim_substrings
+    with_repo_fixture("current") do |repo|
+      fixture = SyntheticRelease.new(
+        cert_claim_overrides: {
+          repository: "#{PMReleaseVerifier::SOURCE_REPO}/evil",
+        },
+      )
+
+      error = assert_raises(PMReleaseVerifier::Error) { verify(repo, fixture) }
+      assert_match(/certificate repository does not match/, error.message)
+    end
+  end
+
+  def test_binds_source_run_id_to_exact_run_url_claim
+    with_repo_fixture("current") do |repo|
+      fixture = SyntheticRelease.new(
+        cert_claim_overrides: {
+          run_url: "https://github.com/#{PMReleaseVerifier::SOURCE_REPO}/actions/runs/#{VALID_SOURCE_RUN_ID}/attempts/1/extra",
+        },
+      )
+
+      error = assert_raises(PMReleaseVerifier::Error) { verify(repo, fixture) }
+      assert_match(/certificate does not bind source_run_id #{VALID_SOURCE_RUN_ID}/, error.message)
     end
   end
 
@@ -155,6 +200,16 @@ class PMReleaseVerifierTest < Minitest::Test
 
       error = assert_raises(PMReleaseVerifier::Error) { verify(repo, fixture) }
       assert_match(/missing GitHub artifact attestation for checksums\.txt/, error.message)
+    end
+  end
+
+  def test_rejects_ambiguous_github_artifact_attestations
+    with_repo_fixture("current") do |repo|
+      fixture = SyntheticRelease.new
+      fixture.external_verifier.duplicate_attestation("checksums.txt")
+
+      error = assert_raises(PMReleaseVerifier::Error) { verify(repo, fixture) }
+      assert_match(/ambiguous GitHub artifact attestations for checksums\.txt/, error.message)
     end
   end
 
@@ -191,23 +246,25 @@ class PMReleaseVerifierTest < Minitest::Test
 
   class SyntheticRelease
     attr_accessor :release_by_id_override
-    attr_reader :release, :asset_bytes, :attestations, :metadata_path, :verification_path, :tmpdir
+    attr_reader :release, :asset_bytes, :metadata_path, :verification_path, :tmpdir,
+                :external_verifier, :attestation_bundle, :attestation_statement
 
     def initialize(metadata: VALID_METADATA, target_commitish: "main", cert_repo: PMReleaseVerifier::SOURCE_REPO,
-                   checksum_overrides: {})
+                   checksum_overrides: {}, cert_claim_overrides: {})
       @metadata = metadata
       @target_commitish = target_commitish
       @cert_repo = cert_repo
       @checksum_overrides = checksum_overrides
+      @cert_claim_overrides = cert_claim_overrides
       @tmpdir = Dir.mktmpdir("pm-release-verifier-fixture-")
       @metadata_path = File.join(@tmpdir, "metadata.json")
       @verification_path = File.join(@tmpdir, "verification.json")
       @asset_bytes = {}
-      @attestations = {}
       @asset_states = {}
       @key, @cert = build_certificate
       build_assets
       build_release
+      @external_verifier = FakeExternalVerifier.new(self)
     end
 
     def remove_asset(name)
@@ -234,11 +291,11 @@ class PMReleaseVerifierTest < Minitest::Test
       bundle = JSON.parse(@asset_bytes.fetch(bundle_name))
       bundle["base64Signature"] = Base64.strict_encode64("not a valid signature")
       set_asset_bytes(bundle_name, "#{JSON.generate(bundle)}\n")
+      external_verifier.reject_cosign(name, "Cosign verification rejected #{name}")
     end
 
     def remove_attestation(name)
-      digest = digest_for(name)
-      @attestations[digest] = { "attestations" => [] }
+      external_verifier.remove_attestation(name)
     end
 
     def digest_for(name)
@@ -263,11 +320,10 @@ class PMReleaseVerifierTest < Minitest::Test
       attestation_subjects = signed_subjects.to_h do |name|
         [name, name == PMReleaseVerifier::CHECKSUMS_NAME ? digest_for(name) : @checksum_overrides.fetch(name, digest_for(name))]
       end
-      attestation_bundle = attestation_bundle_for(attestation_subjects)
+      @attestation_bundle = attestation_bundle_for(attestation_subjects)
       signed_subjects.each do |name|
         digest = digest_for(name)
         @asset_bytes["#{name}#{PMReleaseVerifier::COSIGN_BUNDLE_SUFFIX}"] = "#{JSON.generate(cosign_bundle_for(name, digest))}\n"
-        @attestations[digest] = { "attestations" => [{ "bundle" => attestation_bundle }] }
       end
     end
 
@@ -316,15 +372,22 @@ class PMReleaseVerifierTest < Minitest::Test
       factory.issuer_certificate = cert
       identity = "https://github.com/#{@cert_repo}/.github/workflows/release.yml@refs/heads/main"
       cert.add_extension(factory.create_extension("subjectAltName", "URI:#{identity}", true))
-      cert.add_extension(utf8_extension(PMReleaseVerifier::SIGSTORE_OIDS.fetch(:issuer), PMReleaseVerifier::GITHUB_OIDC_ISSUER))
-      cert.add_extension(utf8_extension(PMReleaseVerifier::SIGSTORE_OIDS.fetch(:event_name), "push"))
-      cert.add_extension(utf8_extension(PMReleaseVerifier::SIGSTORE_OIDS.fetch(:commit_sha), @metadata.fetch("commit")))
-      cert.add_extension(utf8_extension(PMReleaseVerifier::SIGSTORE_OIDS.fetch(:workflow_name), PMReleaseVerifier::RELEASE_WORKFLOW_NAME))
-      cert.add_extension(utf8_extension(PMReleaseVerifier::SIGSTORE_OIDS.fetch(:repository), @cert_repo))
-      cert.add_extension(utf8_extension(PMReleaseVerifier::SIGSTORE_OIDS.fetch(:ref), "refs/heads/main"))
-      cert.add_extension(utf8_extension(PMReleaseVerifier::SIGSTORE_OIDS.fetch(:run_url), "https://github.com/#{@cert_repo}/actions/runs/#{VALID_SOURCE_RUN_ID}/attempts/1"))
+      add_claim(cert, :issuer, PMReleaseVerifier::GITHUB_OIDC_ISSUER)
+      add_claim(cert, :event_name, "push")
+      add_claim(cert, :commit_sha, @metadata.fetch("commit"))
+      add_claim(cert, :workflow_name, PMReleaseVerifier::RELEASE_WORKFLOW_NAME)
+      add_claim(cert, :repository, @cert_repo)
+      add_claim(cert, :ref, "refs/heads/main")
+      add_claim(cert, :run_url, "https://github.com/#{@cert_repo}/actions/runs/#{VALID_SOURCE_RUN_ID}/attempts/1")
       cert.sign(key, OpenSSL::Digest::SHA256.new)
       [key, cert]
+    end
+
+    def add_claim(cert, key, default)
+      value = @cert_claim_overrides.fetch(key, default)
+      return if value.nil?
+
+      cert.add_extension(utf8_extension(PMReleaseVerifier::SIGSTORE_OIDS.fetch(key), value))
     end
 
     def utf8_extension(oid, value)
@@ -355,12 +418,13 @@ class PMReleaseVerifierTest < Minitest::Test
     end
 
     def attestation_bundle_for(subjects)
-      payload = JSON.generate(
+      @attestation_statement = {
         "_type" => PMReleaseVerifier::IN_TOTO_STATEMENT_TYPE,
         "subject" => subjects.map { |name, digest| { "name" => name, "digest" => { "sha256" => digest } } },
         "predicateType" => PMReleaseVerifier::SLSA_PROVENANCE_TYPE,
         "predicate" => { "buildDefinition" => {} },
-      )
+      }
+      payload = JSON.generate(@attestation_statement)
       payload_type = PMReleaseVerifier::ATTESTATION_PAYLOAD_TYPE
       signature = @key.sign(OpenSSL::Digest::SHA256.new, PMReleaseVerifier.dsse_pae(payload_type, payload))
       {
@@ -374,6 +438,71 @@ class PMReleaseVerifierTest < Minitest::Test
           "signatures" => [{ "sig" => Base64.strict_encode64(signature) }],
         },
       }
+    end
+  end
+
+  class FakeExternalVerifier
+    attr_reader :cosign_requests, :attestation_requests
+
+    def initialize(fixture)
+      @fixture = fixture
+      @cosign_requests = []
+      @attestation_requests = []
+      @cosign_failures = {}
+      @missing_attestations = {}
+      @duplicate_attestations = {}
+    end
+
+    def reject_cosign(name, message)
+      @cosign_failures[name] = message
+    end
+
+    def remove_attestation(name)
+      @missing_attestations[name] = true
+    end
+
+    def duplicate_attestation(name)
+      @duplicate_attestations[name] = true
+    end
+
+    def verify_cosign_blob!(subject_path:, bundle_path:, expected_name:, tag:, commit:)
+      @cosign_requests << {
+        expected_name: expected_name,
+        subject_digest: Digest::SHA256.file(subject_path).hexdigest,
+        bundle_digest: Digest::SHA256.file(bundle_path).hexdigest,
+        tag: tag,
+        commit: commit,
+      }
+      message = @cosign_failures[expected_name]
+      raise PMReleaseVerifier::Error, message if message
+
+      true
+    end
+
+    def verify_github_attestation!(subject_path:, expected_name:, tag:, commit:)
+      @attestation_requests << {
+        expected_name: expected_name,
+        subject_digest: Digest::SHA256.file(subject_path).hexdigest,
+        tag: tag,
+        commit: commit,
+      }
+      return [] if @missing_attestations[expected_name]
+
+      entry = attestation_entry
+      @duplicate_attestations[expected_name] ? [entry, deep_copy(entry)] : [entry]
+    end
+
+    private
+
+    def attestation_entry
+      {
+        "attestation" => { "bundle" => @fixture.attestation_bundle },
+        "verificationResult" => { "statement" => @fixture.attestation_statement },
+      }
+    end
+
+    def deep_copy(object)
+      JSON.parse(JSON.generate(object))
     end
   end
 
@@ -433,10 +562,6 @@ class PMReleaseVerifierTest < Minitest::Test
       end
     end
 
-    def attestations_by_digest(digest)
-      deep_copy(@fixture.attestations.fetch(digest, { "attestations" => [] }))
-    end
-
     def fixture_metadata=(metadata)
       @fixture_metadata = metadata
     end
@@ -455,7 +580,7 @@ class PMReleaseVerifierTest < Minitest::Test
     @tmpdirs << fixture.tmpdir unless @tmpdirs.include?(fixture.tmpdir)
     client = FakeClient.new(fixture)
     client.fixture_metadata = fixture.instance_variable_get(:@metadata)
-    PMReleaseVerifier::Operations.new(root: repo, client: client).verify(
+    PMReleaseVerifier::Operations.new(root: repo, client: client, external_verifier: fixture.external_verifier).verify(
       dispatch_schema: dispatch_schema,
       source_repo: source_repo,
       version: version,

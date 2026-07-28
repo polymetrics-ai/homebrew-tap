@@ -36,9 +36,10 @@ formula bump planner for deterministic Formula/README metadata and then verifies
   one `.sigstore.json` bundle for every signed subject;
 - checksum manifest coverage and bindings to downloaded asset bytes;
 - release asset API SHA-256 digests;
-- Cosign bundle signatures, Rekor digest evidence, and GitHub Actions certificate
-  identity for the PM release workflow;
-- GitHub artifact attestation DSSE signatures and complete subject bindings;
+- Cosign bundle signatures, Fulcio/Rekor evidence, and exact GitHub Actions
+  certificate identity for the PM release workflow using `cosign verify-blob`;
+- GitHub artifact attestation trust, exact certificate identity, and complete
+  subject bindings using `gh attestation verify`;
 - dry-run Formula/README selection with no tracked file changes.
 
 The workflow fails on invalid input, release/tag mismatch, source metadata drift,
@@ -61,7 +62,8 @@ README, release, tag, bottle, cask, secret, App, or repository setting.
 
 ## Local development
 
-Run the focused tests with:
+Local dry-runs require `cosign` and the GitHub CLI's `gh attestation verify`
+command on `PATH`. Run the focused tests with:
 
 ```sh
 ruby test/pm_release_verifier_test.rb

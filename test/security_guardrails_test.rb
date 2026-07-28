@@ -133,6 +133,9 @@ class SecurityGuardrailsTest < Minitest::Test
       refute_match(/#{forbidden}/, @dry_run_text)
     end
     assert_includes @dry_run_text, "ruby scripts/pm_release_verifier.rb verify"
+    assert_match(%r{uses:\s+sigstore/cosign-installer@d7543c93d881b35a8faa02e8e3605f69b7a1ce62\b}, @dry_run_text)
+    assert_includes @dry_run_text, "cosign-release: v2.6.4"
+    assert_includes @dry_run_text, "gh attestation verify --help"
     assert_includes @dry_run_text, "Dry-run verifier mutated tracked repository files."
   end
 

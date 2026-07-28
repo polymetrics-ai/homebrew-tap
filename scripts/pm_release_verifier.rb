@@ -6,6 +6,7 @@ require "digest"
 require "fileutils"
 require "json"
 require "net/http"
+require "open3"
 require "openssl"
 require "optparse"
 require "tempfile"
@@ -21,6 +22,7 @@ module PMReleaseVerifier
   VERIFICATION_SCHEMA = "pm-homebrew-release-verification/v1"
   SOURCE_REPO = PMFormulaBump::SOURCE_REPO
   RELEASE_WORKFLOW_IDENTITY_PREFIX = "https://github.com/#{SOURCE_REPO}/.github/workflows/release.yml@"
+  RELEASE_WORKFLOW_SIGNER = "github.com/#{SOURCE_REPO}/.github/workflows/release.yml"
   RELEASE_WORKFLOW_NAME = "Release"
   GITHUB_OIDC_ISSUER = "https://token.actions.githubusercontent.com"
   TARGET_COMMITISH_POLICIES = %w[ignore require-full-sha].freeze
@@ -90,6 +92,17 @@ module PMReleaseVerifier
     signed_subject_names(version).flat_map { |name| [name, "#{name}#{COSIGN_BUNDLE_SUFFIX}"] }.freeze
   end
 
+  def certificate_policies(tag)
+    tag = PMFormulaBump.validate_stable_tag!(tag)
+
+    ["refs/heads/main", "refs/tags/#{tag}"].map do |ref|
+      {
+        ref: ref,
+        identity: "#{RELEASE_WORKFLOW_IDENTITY_PREFIX}#{ref}",
+      }
+    end
+  end
+
   def validate_decimal!(value, description, required: false)
     fail Error, "#{description} is required" if required && value.nil?
     return nil if value.nil?
@@ -125,20 +138,49 @@ module PMReleaseVerifier
     raise Error, "#{description} is not valid JSON"
   end
 
+  def parse_json_array(bytes, description)
+    json = JSON.parse(bytes)
+    fail Error, "#{description} must be a JSON array" unless json.is_a?(Array)
+
+    json
+  rescue JSON::ParserError
+    raise Error, "#{description} is not valid JSON"
+  end
+
+  def parse_x509_certificate(bytes, description)
+    OpenSSL::X509::Certificate.new(bytes)
+  rescue OpenSSL::X509::CertificateError => e
+    raise Error, "#{description} could not be parsed: #{e.message}"
+  end
+
+  def certificate_from_sigstore_bundle(bundle, description)
+    fail Error, "#{description} must be a JSON object" unless bundle.is_a?(Hash)
+
+    parse_x509_certificate(sigstore_bundle_certificate_bytes(bundle, description), description)
+  end
+
+  def sigstore_bundle_certificate_bytes(bundle, description)
+    if bundle["cert"].is_a?(String) && !bundle["cert"].empty?
+      return strict_base64_decode(bundle["cert"], description)
+    end
+
+    raw_bytes = bundle.dig("verificationMaterial", "certificate", "rawBytes")
+    return strict_base64_decode(raw_bytes, description) if raw_bytes.is_a?(String) && !raw_bytes.empty?
+
+    chain = bundle.dig("verificationMaterial", "x509CertificateChain", "certificates")
+    chain_cert = chain.first if chain.is_a?(Array) && chain.first.is_a?(Hash)
+    raw_bytes = chain_cert&.fetch("rawBytes", nil)
+    return strict_base64_decode(raw_bytes, description) if raw_bytes.is_a?(String) && !raw_bytes.empty?
+
+    fail Error, "#{description} is missing certificate bytes"
+  end
+
   def strict_base64_decode(value, description)
     fail Error, "#{description} must be a string" unless value.is_a?(String) && !value.empty?
 
     Base64.strict_decode64(value)
   rescue ArgumentError
     raise Error, "#{description} is not valid base64"
-  end
-
-  def openssl_verify!(public_key, signature, data, description)
-    return if public_key.verify(OpenSSL::Digest::SHA256.new, signature, data)
-
-    fail Error, "#{description} did not verify"
-  rescue OpenSSL::PKey::PKeyError => e
-    raise Error, "#{description} could not be verified: #{e.message}"
   end
 
   def dsse_pae(payload_type, payload)
@@ -160,12 +202,6 @@ module PMReleaseVerifier
 
     def release_by_id(release_id)
       api_json("/repos/#{SOURCE_REPO}/releases/#{release_id}")
-    end
-
-    def attestations_by_digest(sha256_digest)
-      fail Error, "attestation digest must be 64 lowercase hex characters" unless PMFormulaBump::SHA256_PATTERN.match?(sha256_digest)
-
-      api_json("/repos/#{SOURCE_REPO}/attestations/sha256:#{sha256_digest}")
     end
 
     def download_release_asset(name, tag)
@@ -211,6 +247,107 @@ module PMReleaseVerifier
         end
       end
       response
+    end
+  end
+
+  class ExternalVerifier
+    def initialize(cosign: "cosign", gh: "gh")
+      @cosign = cosign
+      @gh = gh
+    end
+
+    def verify_cosign_blob!(subject_path:, bundle_path:, expected_name:, tag:, commit:)
+      with_certificate_policy(tag, "Cosign verification for #{expected_name}") do |policy|
+        run_command(
+          [
+            @cosign,
+            "verify-blob",
+            "--bundle",
+            bundle_path,
+            "--certificate-identity",
+            policy.fetch(:identity),
+            "--certificate-oidc-issuer",
+            GITHUB_OIDC_ISSUER,
+            "--certificate-github-workflow-name",
+            RELEASE_WORKFLOW_NAME,
+            "--certificate-github-workflow-repository",
+            SOURCE_REPO,
+            "--certificate-github-workflow-sha",
+            commit,
+            "--certificate-github-workflow-ref",
+            policy.fetch(:ref),
+            subject_path,
+          ],
+        )
+      end
+    end
+
+    def verify_github_attestation!(subject_path:, expected_name:, tag:, commit:)
+      with_certificate_policy(tag, "GitHub artifact attestation verification for #{expected_name}") do |policy|
+        output = run_command(
+          [
+            @gh,
+            "attestation",
+            "verify",
+            subject_path,
+            "--repo",
+            SOURCE_REPO,
+            "--cert-identity",
+            policy.fetch(:identity),
+            "--cert-oidc-issuer",
+            GITHUB_OIDC_ISSUER,
+            "--signer-workflow",
+            RELEASE_WORKFLOW_SIGNER,
+            "--source-digest",
+            commit,
+            "--source-ref",
+            policy.fetch(:ref),
+            "--predicate-type",
+            SLSA_PROVENANCE_TYPE,
+            "--deny-self-hosted-runners",
+            "--limit",
+            "2",
+            "--format",
+            "json",
+          ],
+        )
+        PMReleaseVerifier.parse_json_array(output, "GitHub artifact attestation verification output for #{expected_name}")
+      end
+    end
+
+    private
+
+    def with_certificate_policy(tag, description)
+      errors = []
+      PMReleaseVerifier.certificate_policies(tag).each do |policy|
+        begin
+          return yield policy
+        rescue Error => e
+          errors << "#{policy.fetch(:ref)}: #{e.message}"
+        end
+      end
+
+      fail Error, "#{description} failed for all approved refs (#{errors.join("; ")})"
+    end
+
+    def run_command(argv)
+      stdout, stderr, status = Open3.capture3(*argv)
+      return stdout if status.success?
+
+      detail = redacted_output(stderr.empty? ? stdout : stderr)
+      suffix = detail.empty? ? "" : ": #{detail}"
+      fail Error, "#{argv.fetch(0)} #{argv.fetch(1)} failed#{suffix}"
+    rescue Errno::ENOENT
+      raise Error, "#{argv.fetch(0)} is required for release verification"
+    end
+
+    def redacted_output(text)
+      redacted = text.to_s
+      %w[GITHUB_TOKEN GH_TOKEN].each do |name|
+        token = ENV[name]
+        redacted = redacted.gsub(token, "[REDACTED]") if token && !token.empty?
+      end
+      redacted.lines.first(5).join.strip
     end
   end
 
@@ -299,8 +436,9 @@ module PMReleaseVerifier
   end
 
   class AssetVerifier
-    def initialize(client:)
+    def initialize(client:, external_verifier: ExternalVerifier.new)
       @client = client
+      @external_verifier = external_verifier
     end
 
     def verify!(release:, metadata:, source_run_id:)
@@ -309,25 +447,27 @@ module PMReleaseVerifier
       commit = metadata.fetch("commit")
       assets_by_name = validate_asset_inventory!(release.fetch("assets"), version)
 
-      checksums_bytes, checksums_digest = download_verified_asset!(assets_by_name.fetch(CHECKSUMS_NAME), tag)
-      checksum_entries = parse_checksum_manifest!(checksums_bytes, PMReleaseVerifier.expected_subject_asset_names(version))
-      subject_digests = { CHECKSUMS_NAME => checksums_digest }.merge(checksum_entries)
+      checksum_entries = nil
+      subject_digests = nil
+      with_verified_asset!(assets_by_name.fetch(CHECKSUMS_NAME), tag) do |path, checksums_digest|
+        checksums_bytes = File.binread(path)
+        checksum_entries = parse_checksum_manifest!(checksums_bytes, PMReleaseVerifier.expected_subject_asset_names(version))
+        subject_digests = { CHECKSUMS_NAME => checksums_digest }.merge(checksum_entries)
 
-      verify_signed_subject!(
-        name: CHECKSUMS_NAME,
-        bytes: checksums_bytes,
-        digest: checksums_digest,
-        assets_by_name: assets_by_name,
-        tag: tag,
-        commit: commit,
-        source_run_id: source_run_id,
-        expected_attestation_subjects: subject_digests,
-      )
+        verify_signed_subject!(
+          name: CHECKSUMS_NAME,
+          subject_path: path,
+          digest: checksums_digest,
+          assets_by_name: assets_by_name,
+          tag: tag,
+          commit: commit,
+          source_run_id: source_run_id,
+          expected_attestation_subjects: subject_digests,
+        )
+      end
 
       PMReleaseVerifier.expected_subject_asset_names(version).each do |name|
-        @client.download_release_asset(name, tag) do |path|
-          digest = Digest::SHA256.file(path).hexdigest
-          assert_release_asset_digest!(assets_by_name.fetch(name), digest)
+        with_verified_asset!(assets_by_name.fetch(name), tag) do |path, digest|
           expected_digest = checksum_entries.fetch(name)
           unless digest == expected_digest
             fail Error, "checksum manifest digest for #{name} does not match downloaded asset"
@@ -335,7 +475,7 @@ module PMReleaseVerifier
 
           verify_signed_subject!(
             name: name,
-            bytes: File.binread(path),
+            subject_path: path,
             digest: digest,
             assets_by_name: assets_by_name,
             tag: tag,
@@ -417,19 +557,22 @@ module PMReleaseVerifier
       entries
     end
 
-    def verify_signed_subject!(name:, bytes:, digest:, assets_by_name:, tag:, commit:, source_run_id:, expected_attestation_subjects:)
+    def verify_signed_subject!(name:, subject_path:, digest:, assets_by_name:, tag:, commit:, source_run_id:, expected_attestation_subjects:)
       bundle_name = "#{name}#{COSIGN_BUNDLE_SUFFIX}"
-      bundle_bytes, = download_verified_asset!(assets_by_name.fetch(bundle_name), tag)
-      CosignBundleVerifier.verify!(
-        bundle_bytes: bundle_bytes,
-        subject_bytes: bytes,
-        expected_name: name,
-        expected_digest: digest,
-        tag: tag,
-        commit: commit,
-        source_run_id: source_run_id,
-      )
-      AttestationVerifier.new(client: @client).verify!(
+      with_verified_asset!(assets_by_name.fetch(bundle_name), tag) do |bundle_path, _bundle_digest|
+        CosignBundleVerifier.verify!(
+          bundle_path: bundle_path,
+          subject_path: subject_path,
+          external_verifier: @external_verifier,
+          expected_name: name,
+          expected_digest: digest,
+          tag: tag,
+          commit: commit,
+          source_run_id: source_run_id,
+        )
+      end
+      AttestationVerifier.new(external_verifier: @external_verifier).verify!(
+        subject_path: subject_path,
         expected_name: name,
         expected_digest: digest,
         expected_subjects: expected_attestation_subjects,
@@ -439,15 +582,12 @@ module PMReleaseVerifier
       )
     end
 
-    def download_verified_asset!(asset, tag)
-      bytes = nil
-      digest = nil
+    def with_verified_asset!(asset, tag)
       @client.download_release_asset(asset.fetch("name"), tag) do |path|
         digest = Digest::SHA256.file(path).hexdigest
         assert_release_asset_digest!(asset, digest)
-        bytes = File.binread(path)
+        yield path, digest
       end
-      [bytes, digest]
     end
 
     def assert_release_asset_digest!(asset, actual_digest)
@@ -461,82 +601,55 @@ module PMReleaseVerifier
   end
 
   class CosignBundleVerifier
-    def self.verify!(bundle_bytes:, subject_bytes:, expected_name:, expected_digest:, tag:, commit:, source_run_id:)
-      bundle = PMReleaseVerifier.parse_json_object(bundle_bytes, "Cosign bundle for #{expected_name}")
-      signature_b64 = string_field(bundle, "base64Signature", "Cosign bundle for #{expected_name}")
-      signature = PMReleaseVerifier.strict_base64_decode(signature_b64, "Cosign signature for #{expected_name}")
-      cert_pem = PMReleaseVerifier.strict_base64_decode(
-        string_field(bundle, "cert", "Cosign bundle for #{expected_name}"),
-        "Cosign certificate for #{expected_name}",
+    def self.verify!(bundle_path:, subject_path:, external_verifier:, expected_name:, expected_digest:, tag:, commit:, source_run_id:)
+      external_verifier.verify_cosign_blob!(
+        subject_path: subject_path,
+        bundle_path: bundle_path,
+        expected_name: expected_name,
+        tag: tag,
+        commit: commit,
       )
-      cert = parse_certificate(cert_pem, "Cosign certificate for #{expected_name}")
+      bundle = PMReleaseVerifier.parse_json_object(File.binread(bundle_path), "Cosign bundle for #{expected_name}")
+      cert = PMReleaseVerifier.certificate_from_sigstore_bundle(bundle, "Cosign certificate for #{expected_name}")
       CertificatePolicy.validate!(cert, tag: tag, commit: commit, source_run_id: source_run_id)
-      PMReleaseVerifier.openssl_verify!(cert.public_key, signature, subject_bytes, "Cosign signature for #{expected_name}")
-      verify_rekor_bundle!(bundle["rekorBundle"], expected_name, expected_digest, signature_b64)
+      fail Error, "Cosign subject digest for #{expected_name} is invalid" unless PMFormulaBump::SHA256_PATTERN.match?(expected_digest)
     end
-
-    def self.string_field(hash, key, description)
-      value = hash[key]
-      fail Error, "#{description} is missing #{key}" unless value.is_a?(String) && !value.empty?
-
-      value
-    end
-    private_class_method :string_field
-
-    def self.parse_certificate(bytes, description)
-      OpenSSL::X509::Certificate.new(bytes)
-    rescue OpenSSL::X509::CertificateError => e
-      raise Error, "#{description} could not be parsed: #{e.message}"
-    end
-    private_class_method :parse_certificate
-
-    def self.verify_rekor_bundle!(rekor_bundle, expected_name, expected_digest, signature_b64)
-      fail Error, "Cosign bundle for #{expected_name} is missing Rekor evidence" unless rekor_bundle.is_a?(Hash)
-
-      body_b64 = rekor_bundle.dig("Payload", "body")
-      body = PMReleaseVerifier.parse_json_object(
-        PMReleaseVerifier.strict_base64_decode(body_b64, "Rekor body for #{expected_name}"),
-        "Rekor body for #{expected_name}",
-      )
-      algorithm = body.dig("spec", "data", "hash", "algorithm")
-      value = body.dig("spec", "data", "hash", "value")
-      fail Error, "Rekor body for #{expected_name} must bind sha256" unless algorithm == "sha256"
-      fail Error, "Rekor body for #{expected_name} digest does not match subject" unless value == expected_digest
-
-      rekor_signature = body.dig("spec", "signature", "content")
-      fail Error, "Rekor body for #{expected_name} signature does not match Cosign bundle" unless rekor_signature == signature_b64
-    end
-    private_class_method :verify_rekor_bundle!
   end
 
   class CertificatePolicy
     def self.validate!(cert, tag:, commit:, source_run_id:)
-      values = extension_values(cert)
-      allowed_refs = ["refs/heads/main", "refs/tags/#{tag}"]
-      allowed_identities = allowed_refs.map { |ref| "#{RELEASE_WORKFLOW_IDENTITY_PREFIX}#{ref}" }
+      values = extension_utf8_values(cert)
+      issuer = required_claim(values, :issuer, "certificate issuer")
+      repository = required_claim(values, :repository, "certificate repository")
+      workflow_name = required_claim(values, :workflow_name, "certificate workflow name")
+      commit_sha = required_claim(values, :commit_sha, "certificate commit")
+      ref = required_claim(values, :ref, "certificate ref")
 
-      unless (subject_alt_names(cert) & allowed_identities).any?
-        fail Error, "certificate subject identity is not the PM release workflow"
-      end
-      unless extension_values_include?(values, SIGSTORE_OIDS.fetch(:issuer), GITHUB_OIDC_ISSUER)
+      unless issuer == GITHUB_OIDC_ISSUER
         fail Error, "certificate issuer is not GitHub Actions OIDC"
       end
-      unless extension_values_include?(values, SIGSTORE_OIDS.fetch(:repository), SOURCE_REPO)
+      unless repository == SOURCE_REPO
         fail Error, "certificate repository does not match #{SOURCE_REPO}"
       end
-      unless extension_values_include?(values, SIGSTORE_OIDS.fetch(:workflow_name), RELEASE_WORKFLOW_NAME)
+      unless workflow_name == RELEASE_WORKFLOW_NAME
         fail Error, "certificate workflow name does not match #{RELEASE_WORKFLOW_NAME}"
       end
-      unless extension_values_include?(values, SIGSTORE_OIDS.fetch(:commit_sha), commit)
+      unless commit_sha == commit
         fail Error, "certificate commit does not match immutable tag commit"
       end
-      unless allowed_refs.any? { |ref| extension_values_include?(values, SIGSTORE_OIDS.fetch(:ref), ref) }
+
+      allowed_policies = PMReleaseVerifier.certificate_policies(tag)
+      unless allowed_policies.any? { |policy| policy.fetch(:ref) == ref }
         fail Error, "certificate ref is not an approved PM release ref"
+      end
+      unless allowed_policies.any? { |policy| policy.fetch(:ref) == ref && subject_alt_names(cert).include?(policy.fetch(:identity)) }
+        fail Error, "certificate subject identity is not the PM release workflow"
       end
       return unless source_run_id
 
-      run_values = cert.extensions.map(&:value)
-      return if run_values.any? { |value| value.include?("/actions/runs/#{source_run_id}/") }
+      run_url = required_claim(values, :run_url, "certificate run URL")
+      expected_run_url = %r{\Ahttps://github\.com/#{Regexp.escape(SOURCE_REPO)}/actions/runs/#{Regexp.escape(source_run_id)}/attempts/[1-9][0-9]*\z}
+      return if expected_run_url.match?(run_url)
 
       fail Error, "certificate does not bind source_run_id #{source_run_id}"
     end
@@ -551,70 +664,82 @@ module PMReleaseVerifier
     end
     private_class_method :subject_alt_names
 
-    def self.extension_values(cert)
+    def self.extension_utf8_values(cert)
       cert.extensions.each_with_object(Hash.new { |hash, key| hash[key] = [] }) do |extension, values|
-        values[extension.oid] << extension.value
+        next unless SIGSTORE_OIDS.value?(extension.oid)
+
+        values[extension.oid] << decode_utf8_extension(extension)
       end
     end
-    private_class_method :extension_values
+    private_class_method :extension_utf8_values
 
-    def self.extension_values_include?(values, oid, expected)
-      values.fetch(oid, []).any? { |value| value == expected || value.include?(expected) }
+    def self.decode_utf8_extension(extension)
+      extension_sequence = OpenSSL::ASN1.decode(extension.to_der)
+      octet = extension_sequence.value.find { |value| value.is_a?(OpenSSL::ASN1::OctetString) }
+      fail Error, "certificate extension #{extension.oid} is malformed" unless octet
+
+      decoded = OpenSSL::ASN1.decode(octet.value)
+      unless decoded.is_a?(OpenSSL::ASN1::UTF8String)
+        fail Error, "certificate extension #{extension.oid} must be a UTF8String"
+      end
+
+      decoded.value
+    rescue OpenSSL::ASN1::ASN1Error => e
+      raise Error, "certificate extension #{extension.oid} could not be decoded: #{e.message}"
     end
-    private_class_method :extension_values_include?
+    private_class_method :decode_utf8_extension
+
+    def self.required_claim(values, key, description)
+      oid = SIGSTORE_OIDS.fetch(key)
+      claim_values = values.fetch(oid, [])
+      fail Error, "#{description} claim is missing" if claim_values.empty?
+      fail Error, "#{description} claim appears multiple times" if claim_values.length > 1
+
+      claim_values.first
+    end
+    private_class_method :required_claim
   end
 
   class AttestationVerifier
-    def initialize(client:)
-      @client = client
+    def initialize(external_verifier:)
+      @external_verifier = external_verifier
     end
 
-    def verify!(expected_name:, expected_digest:, expected_subjects:, tag:, commit:, source_run_id:)
-      response = @client.attestations_by_digest(expected_digest)
-      attestations = response["attestations"]
-      fail Error, "GitHub artifact attestation response for #{expected_name} must contain attestations" unless attestations.is_a?(Array)
+    def verify!(subject_path:, expected_name:, expected_digest:, expected_subjects:, tag:, commit:, source_run_id:)
+      attestations = @external_verifier.verify_github_attestation!(
+        subject_path: subject_path,
+        expected_name: expected_name,
+        tag: tag,
+        commit: commit,
+      )
+      fail Error, "GitHub artifact attestation verification output for #{expected_name} must be an array" unless attestations.is_a?(Array)
       fail Error, "missing GitHub artifact attestation for #{expected_name}" if attestations.empty?
       fail Error, "ambiguous GitHub artifact attestations for #{expected_name}" if attestations.length > 1
 
-      bundle = attestations.first["bundle"]
-      fail Error, "GitHub artifact attestation for #{expected_name} is missing bundle" unless bundle.is_a?(Hash)
-      verify_bundle!(bundle, expected_name, expected_digest, expected_subjects, tag, commit, source_run_id)
+      verify_entry!(attestations.first, expected_name, expected_digest, expected_subjects, tag, commit, source_run_id)
     end
 
     private
 
-    def verify_bundle!(bundle, expected_name, expected_digest, expected_subjects, tag, commit, source_run_id)
+    def verify_entry!(entry, expected_name, expected_digest, expected_subjects, tag, commit, source_run_id)
+      fail Error, "GitHub artifact attestation for #{expected_name} must be an object" unless entry.is_a?(Hash)
+
+      bundle = entry.dig("attestation", "bundle")
+      fail Error, "GitHub artifact attestation for #{expected_name} is missing bundle" unless bundle.is_a?(Hash)
       unless bundle["mediaType"] == ATTESTATION_BUNDLE_MEDIA_TYPE
         fail Error, "GitHub artifact attestation for #{expected_name} has unsupported mediaType"
       end
 
-      cert_bytes = PMReleaseVerifier.strict_base64_decode(
-        bundle.dig("verificationMaterial", "certificate", "rawBytes"),
+      cert = PMReleaseVerifier.certificate_from_sigstore_bundle(
+        bundle,
         "GitHub artifact attestation certificate for #{expected_name}",
       )
-      cert = OpenSSL::X509::Certificate.new(cert_bytes)
       CertificatePolicy.validate!(cert, tag: tag, commit: commit, source_run_id: source_run_id)
 
-      envelope = bundle["dsseEnvelope"]
-      fail Error, "GitHub artifact attestation for #{expected_name} is missing DSSE envelope" unless envelope.is_a?(Hash)
-      fail Error, "GitHub artifact attestation for #{expected_name} has unsupported payloadType" unless envelope["payloadType"] == ATTESTATION_PAYLOAD_TYPE
+      statement = entry.dig("verificationResult", "statement")
+      fail Error, "GitHub artifact attestation statement for #{expected_name} must be an object" unless statement.is_a?(Hash)
 
-      payload = PMReleaseVerifier.strict_base64_decode(envelope["payload"], "GitHub artifact attestation payload for #{expected_name}")
-      signatures = envelope["signatures"]
-      fail Error, "GitHub artifact attestation for #{expected_name} must have exactly one signature" unless signatures.is_a?(Array) && signatures.length == 1
-
-      signature = PMReleaseVerifier.strict_base64_decode(signatures.first["sig"], "GitHub artifact attestation signature for #{expected_name}")
-      PMReleaseVerifier.openssl_verify!(
-        cert.public_key,
-        signature,
-        PMReleaseVerifier.dsse_pae(envelope.fetch("payloadType"), payload),
-        "GitHub artifact attestation signature for #{expected_name}",
-      )
-
-      statement = PMReleaseVerifier.parse_json_object(payload, "GitHub artifact attestation statement for #{expected_name}")
       validate_statement!(statement, expected_name, expected_digest, expected_subjects)
-    rescue OpenSSL::X509::CertificateError => e
-      raise Error, "GitHub artifact attestation certificate for #{expected_name} could not be parsed: #{e.message}"
     end
 
     def validate_statement!(statement, expected_name, expected_digest, expected_subjects)
@@ -663,14 +788,14 @@ module PMReleaseVerifier
       release_assets
     ].freeze
 
-    def initialize(root: PMFormulaBump.default_root, client: GitHubClient.new)
+    def initialize(root: PMFormulaBump.default_root, client: GitHubClient.new, external_verifier: ExternalVerifier.new)
       @root = File.realpath(root)
       @client = client
       @planner = PMFormulaBump::Planner.new(client: @client)
       @paths = PMFormulaBump::Paths.new(root: @root)
       @formula_operations = PMFormulaBump::Operations.new(root: @root, planner: @planner)
       @release_validator = ReleaseValidator.new(client: @client)
-      @asset_verifier = AssetVerifier.new(client: @client)
+      @asset_verifier = AssetVerifier.new(client: @client, external_verifier: external_verifier)
     end
 
     def verify(dispatch_schema:, source_repo:, version:, release_id:, source_run_id:, target_commitish_policy:,

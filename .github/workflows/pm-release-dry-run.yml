@@ -55,8 +55,14 @@ jobs:
       - name: Check out tap
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@d7543c93d881b35a8faa02e8e3605f69b7a1ce62 # v3.10.0
+        with:
+          cosign-release: v2.6.4
+
       - name: Verify released PM version without mutation
         env:
+          GH_TOKEN: ${{ github.token }}
           GITHUB_TOKEN: ${{ github.token }}
           PM_DISPATCH_SCHEMA: ${{ inputs.dispatch_schema }}
           PM_SOURCE_REPO: ${{ inputs.source_repo }}
@@ -69,6 +75,9 @@ jobs:
 
           metadata="${RUNNER_TEMP}/pm-formula-metadata.json"
           verification="${RUNNER_TEMP}/pm-release-verification.json"
+
+          cosign version >/dev/null
+          gh attestation verify --help >/dev/null
 
           ruby scripts/pm_release_verifier.rb verify \
             --dispatch-schema "${PM_DISPATCH_SCHEMA}" \
