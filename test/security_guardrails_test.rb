@@ -143,12 +143,12 @@ class SecurityGuardrailsTest < Minitest::Test
       --format
       --limit
       --predicate-type
-      --signer-workflow
       --source-digest
       --source-ref
     ].each do |flag|
       assert_includes @dry_run_text, flag
     end
+    refute_includes @dry_run_text, "--signer-workflow"
     assert_includes @dry_run_text, "Dry-run verifier mutated tracked repository files."
   end
 

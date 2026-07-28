@@ -88,7 +88,6 @@ jobs:
             --format \
             --limit \
             --predicate-type \
-            --signer-workflow \
             --source-digest \
             --source-ref
           do

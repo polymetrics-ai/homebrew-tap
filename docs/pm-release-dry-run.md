@@ -78,6 +78,8 @@ token instead of a local PAT or App credential:
 
 ```sh
 metadata_dir="$(mktemp -d)"
+export GH_CONFIG_DIR="${metadata_dir}/gh-config"
+mkdir -p "$GH_CONFIG_DIR"
 trap 'rm -rf "$metadata_dir"' EXIT
 unset GITHUB_TOKEN GH_TOKEN
 ruby scripts/pm_release_verifier.rb verify \

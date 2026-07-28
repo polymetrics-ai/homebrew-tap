@@ -213,6 +213,37 @@ class PMReleaseVerifierTest < Minitest::Test
     end
   end
 
+  def test_external_attestation_verifier_uses_compatible_policy_selectors
+    Dir.mktmpdir("pm-release-verifier-gh-") do |dir|
+      gh = File.join(dir, "gh")
+      args_log = File.join(dir, "args.json")
+      File.write(gh, <<~RUBY)
+        #!/usr/bin/env ruby
+        require "json"
+        File.write(ENV.fetch("ARGS_LOG"), JSON.generate(ARGV))
+        puts "[]"
+      RUBY
+      File.chmod(0o700, gh)
+
+      verifier = PMReleaseVerifier::ExternalVerifier.new(gh: gh)
+      with_env("ARGS_LOG" => args_log) do
+        verifier.verify_github_attestation!(
+          subject_path: __FILE__,
+          expected_name: "checksums.txt",
+          tag: VALID_METADATA.fetch("tag"),
+          commit: VALID_METADATA.fetch("commit"),
+        )
+      end
+
+      args = JSON.parse(File.read(args_log))
+      assert_includes args, "--cert-identity"
+      assert_includes args, "--cert-oidc-issuer"
+      assert_includes args, "--source-digest"
+      assert_includes args, "--source-ref"
+      refute_includes args, "--signer-workflow"
+    end
+  end
+
   def test_ignores_mutable_target_commitish_by_default_but_strict_policy_refuses_it
     with_repo_fixture("current") do |repo|
       fixture = SyntheticRelease.new(target_commitish: "main")
@@ -610,5 +641,13 @@ class PMReleaseVerifierTest < Minitest::Test
     stdout, stderr, status = Open3.capture3("git", "-C", repo, *args)
     assert status.success?, stderr
     stdout
+  end
+
+  def with_env(values)
+    previous = values.to_h { |key, _value| [key, ENV[key]] }
+    values.each { |key, value| ENV[key] = value }
+    yield
+  ensure
+    previous.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
   end
 end

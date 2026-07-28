@@ -22,7 +22,6 @@ module PMReleaseVerifier
   VERIFICATION_SCHEMA = "pm-homebrew-release-verification/v1"
   SOURCE_REPO = PMFormulaBump::SOURCE_REPO
   RELEASE_WORKFLOW_IDENTITY_PREFIX = "https://github.com/#{SOURCE_REPO}/.github/workflows/release.yml@"
-  RELEASE_WORKFLOW_SIGNER = "github.com/#{SOURCE_REPO}/.github/workflows/release.yml"
   RELEASE_WORKFLOW_NAME = "Release"
   GITHUB_OIDC_ISSUER = "https://token.actions.githubusercontent.com"
   TARGET_COMMITISH_POLICIES = %w[ignore require-full-sha].freeze
@@ -296,8 +295,6 @@ module PMReleaseVerifier
             policy.fetch(:identity),
             "--cert-oidc-issuer",
             GITHUB_OIDC_ISSUER,
-            "--signer-workflow",
-            RELEASE_WORKFLOW_SIGNER,
             "--source-digest",
             commit,
             "--source-ref",
