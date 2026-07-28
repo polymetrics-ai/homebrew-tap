@@ -33,8 +33,10 @@ jobs:
       - name: Check out tap
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Run security guardrail tests
-        run: ruby test/security_guardrails_test.rb
+      - name: Run tap guardrail and tooling tests
+        run: |
+          ruby test/security_guardrails_test.rb
+          ruby test/pm_formula_bump_test.rb
 
       - name: Set up Homebrew on Linux
         if: runner.os == 'Linux'

@@ -4,6 +4,36 @@ Use this checklist for future immutable PM tags. Do not use moving branches,
 unchecked archives, direct release assets, bottles, or provenance changes unless
 that work has been separately approved.
 
+## Preferred deterministic tooling
+
+Use the tap-owned Ruby helper before opening a formula bump PR. Keep metadata and
+any downloads outside tracked repository paths, such as under `mktemp -d` or
+`$RUNNER_TEMP`:
+
+```sh
+metadata_dir="$(mktemp -d)"
+trap 'rm -rf "$metadata_dir"' EXIT
+ruby scripts/pm_formula_bump.rb plan \
+  --tag vX.Y.Z \
+  --metadata-out "$metadata_dir/pm-formula-metadata.json"
+ruby scripts/pm_formula_bump.rb apply \
+  --metadata "$metadata_dir/pm-formula-metadata.json" \
+  --formula Formula/pm.rb \
+  --readme README.md \
+  --write
+ruby scripts/pm_formula_bump.rb check \
+  --metadata "$metadata_dir/pm-formula-metadata.json" \
+  --formula Formula/pm.rb \
+  --readme README.md
+```
+
+The helper accepts only stable tags like `v1.2.3`, keeps the upstream repository
+and source archive URL fixed to `polymetrics-ai/cli`, resolves the tag commit and
+commit date from GitHub, hashes the immutable source archive, updates
+`Formula/pm.rb` and the README trust metadata together, and refuses downgrades,
+same-version metadata conflicts, unexpected tracked-file changes, and paths
+outside the formula/README allowlist.
+
 ## 1. Confirm the upstream tag
 
 1. Confirm the intended PM tag exists in `polymetrics-ai/cli` and is immutable
