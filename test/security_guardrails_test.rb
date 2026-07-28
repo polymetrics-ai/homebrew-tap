@@ -5,6 +5,8 @@ require "yaml"
 
 class SecurityGuardrailsTest < Minitest::Test
   ROOT = File.expand_path("..", __dir__).freeze
+  FORMULA = File.join(ROOT, "Formula/pm.rb").freeze
+  README = File.join(ROOT, "README.md").freeze
   AUTH_WORKFLOW = File.join(ROOT, ".github/workflows/pull-request-authorization.yml").freeze
   HOMEBREW_WORKFLOW = File.join(ROOT, ".github/workflows/homebrew.yml").freeze
   CODEOWNERS = File.join(ROOT, ".github/CODEOWNERS").freeze
@@ -37,6 +39,8 @@ class SecurityGuardrailsTest < Minitest::Test
   def setup
     @auth_text = File.read(AUTH_WORKFLOW)
     @homebrew_text = File.read(HOMEBREW_WORKFLOW)
+    @formula_text = File.read(FORMULA)
+    @readme_text = File.read(README)
   end
 
   def test_workflows_are_valid_yaml
@@ -118,7 +122,42 @@ class SecurityGuardrailsTest < Minitest::Test
     assert_match(%r{uses:\s+actions/checkout@11d5960a326750d5838078e36cf38b85af677262\b}, @homebrew_text)
   end
 
+  def test_readme_trust_metadata_matches_pm_formula
+    assert_equal pm_formula_metadata, readme_trust_metadata
+  end
+
   private
+
+  def pm_formula_metadata
+    {
+      source:     capture(@formula_text, /^\s*url "([^"]+)"$/, "formula source URL"),
+      sha256:     capture(@formula_text, /^\s*sha256 "([0-9a-f]{64})"$/, "formula SHA-256"),
+      version:    capture(@formula_text, %r{-X polymetrics\.ai/internal/cli\.version=([^\s]+)},
+                          "formula version metadata"),
+      commit:     capture(@formula_text, %r{-X polymetrics\.ai/internal/cli\.commit=([0-9a-f]{40})},
+                          "formula commit metadata"),
+      build_date: capture(@formula_text, %r{-X polymetrics\.ai/internal/cli\.buildDate=([^\s]+)},
+                          "formula build date metadata"),
+    }
+  end
+
+  def readme_trust_metadata
+    {
+      source:     capture(@readme_text, /^- source: `([^`]+)`$/, "README source URL"),
+      sha256:     capture(@readme_text, /^- SHA-256: `([0-9a-f]{64})`$/, "README SHA-256"),
+      version:    capture(@readme_text, /version `([^`]+)`, commit\s+`[0-9a-f]{40}`, and build date/,
+                          "README version metadata"),
+      commit:     capture(@readme_text, /version `[^`]+`, commit\s+`([0-9a-f]{40})`, and build date/,
+                          "README commit metadata"),
+      build_date: capture(@readme_text, /and build date\s+`([^`]+)`/, "README build date metadata"),
+    }
+  end
+
+  def capture(text, pattern, description)
+    match = text.match(pattern)
+    refute_nil match, "#{description} should be present"
+    match[1]
+  end
 
   def assert_concurrency_group(workflow_text, group_pattern)
     assert_match(/^concurrency:\n  group: "#{group_pattern}"\n  cancel-in-progress: true$/m, workflow_text)
