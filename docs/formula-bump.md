@@ -29,7 +29,7 @@ ruby scripts/pm_formula_bump.rb check \
 
 The helper accepts only stable tags like `v1.2.3`, keeps the upstream repository
 and source archive URL fixed to `polymetrics-ai/cli`, resolves the tag commit and
-commit date from GitHub, hashes the immutable source archive, updates
+commit date from the GitHub tag ref, hashes the immutable source archive, updates
 `Formula/pm.rb` and the README trust metadata together, and refuses downgrades,
 same-version metadata conflicts, unexpected tracked-file changes, and paths
 outside the formula/README allowlist.

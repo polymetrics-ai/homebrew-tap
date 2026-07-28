@@ -22,12 +22,13 @@ class PMFormulaBumpTest < Minitest::Test
   end
 
   class FakeClient
-    attr_reader :download_requests
+    attr_reader :commit_requests, :download_requests
 
     def initialize(metadata = VALID_METADATA, release_overrides: {}, tag_type: "commit")
       @metadata = metadata
       @release_overrides = release_overrides
       @tag_type = tag_type
+      @commit_requests = []
       @download_requests = []
     end
 
@@ -53,7 +54,10 @@ class PMFormulaBumpTest < Minitest::Test
       { "object" => { "type" => "commit", "sha" => @metadata.fetch("commit") } }
     end
 
-    def commit(_commitish)
+    def commit(commitish)
+      @commit_requests << commitish
+      fail PMFormulaBump::Error, "unexpected commit lookup: #{commitish}" unless commitish == @metadata.fetch("commit")
+
       {
         "sha" => @metadata.fetch("commit"),
         "commit" => { "committer" => { "date" => @metadata.fetch("build_date") } },
@@ -103,6 +107,15 @@ class PMFormulaBumpTest < Minitest::Test
     metadata = PMFormulaBump::Planner.new(client: client).plan("v0.1.1")
 
     assert_equal VALID_METADATA.fetch("commit"), metadata.fetch("commit")
+  end
+
+  def test_plan_uses_tag_commit_not_branch_valued_release_target
+    client = FakeClient.new(VALID_METADATA, release_overrides: { "target_commitish" => "main" })
+    metadata = PMFormulaBump::Planner.new(client: client).plan("v0.1.1")
+
+    assert_equal VALID_METADATA.fetch("commit"), metadata.fetch("commit")
+    assert_equal VALID_METADATA.fetch("build_date"), metadata.fetch("build_date")
+    assert_equal [VALID_METADATA.fetch("commit")], client.commit_requests
   end
 
   def test_apply_without_write_is_dry_run_and_does_not_change_files

@@ -25,7 +25,6 @@ module PMFormulaBump
   SHA256_PATTERN = /\A[0-9a-f]{64}\z/
   COMMIT_PATTERN = /\A[0-9a-f]{40}\z/
   UTC_TIME_PATTERN = /\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\z/
-  SAFE_COMMITISH_PATTERN = /\A[0-9A-Za-z][0-9A-Za-z._\/-]*\z/
   REQUIRED_ARCHIVE_FILES = %w[
     go.mod
     cmd/pm
@@ -378,11 +377,6 @@ module PMFormulaBump
       validate_release!(release, tag)
 
       tag_commit = resolve_tag_commit(tag)
-      release_commit = resolve_release_commit(release.fetch("target_commitish"), tag)
-      unless release_commit == tag_commit
-        fail Error, "release target_commitish resolves to #{release_commit}, not tag commit #{tag_commit}"
-      end
-
       commit_json = @client.commit(tag_commit)
       build_date = commit_json.dig("commit", "committer", "date")
       fail Error, "commit response is missing committer date" unless build_date
@@ -425,18 +419,6 @@ module PMFormulaBump
       else
         fail Error, "tag ref must point to a commit or annotated tag, not #{type.inspect}"
       end
-    end
-
-    def resolve_release_commit(target_commitish, tag)
-      target = target_commitish.to_s
-      fail Error, "release target_commitish is required" if target.empty?
-      fail Error, "release target_commitish must not look like an option" if target.start_with?("-")
-      unless SAFE_COMMITISH_PATTERN.match?(target) && !target.include?("..") && !target.include?("//")
-        fail Error, "release target_commitish contains unsafe characters"
-      end
-
-      commit = @client.commit(target)
-      validate_commit_sha!(commit["sha"], "release target commit for #{tag}")
     end
 
     def validate_commit_sha!(sha, description)
