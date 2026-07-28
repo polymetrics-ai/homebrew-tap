@@ -19,11 +19,11 @@ This tap builds PM from the immutable upstream source archive for the formula
 version, not from a moving branch or unchecked release asset. The `pm` formula
 pins:
 
-- source: `https://github.com/polymetrics-ai/cli/archive/refs/tags/v0.1.0.tar.gz`
-- SHA-256: `c947c513a2e192b5b730070ef2052e14eadacd199edc4d3051943a65c27050ea`
-- build metadata embedded in `pm version --json`: version `0.1.0`, commit
-  `6de947ca89946a461b5c4c5b0daadf3a0f0f6ad6`, and build date
-  `2026-07-27T16:59:34+05:30`
+- source: `https://github.com/polymetrics-ai/cli/archive/refs/tags/v0.1.1.tar.gz`
+- SHA-256: `09e94f2a6524d881aed328c30b27f9ff39e40975fea67b4a540ea76a8ef4fa00`
+- build metadata embedded in `pm version --json`: version `0.1.1`, commit
+  `4a30b802d5b9ab7188181eacac1812cceed0e543`, and build date
+  `2026-07-28T12:29:42Z`
 
 After installation, verify the build you received:
 
