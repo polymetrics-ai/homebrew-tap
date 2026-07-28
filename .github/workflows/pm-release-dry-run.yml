@@ -77,7 +77,26 @@ jobs:
           verification="${RUNNER_TEMP}/pm-release-verification.json"
 
           cosign version >/dev/null
-          gh attestation verify --help >/dev/null
+          if ! gh_attestation_help="$(gh attestation verify --help 2>&1)"; then
+            printf '%s\n' "${gh_attestation_help}" >&2
+            exit 1
+          fi
+          for required_flag in \
+            --cert-identity \
+            --cert-oidc-issuer \
+            --deny-self-hosted-runners \
+            --format \
+            --limit \
+            --predicate-type \
+            --signer-workflow \
+            --source-digest \
+            --source-ref
+          do
+            if [[ "${gh_attestation_help}" != *"${required_flag}"* ]]; then
+              echo "GitHub CLI attestation verifier is missing ${required_flag} support." >&2
+              exit 1
+            fi
+          done
 
           ruby scripts/pm_release_verifier.rb verify \
             --dispatch-schema "${PM_DISPATCH_SCHEMA}" \

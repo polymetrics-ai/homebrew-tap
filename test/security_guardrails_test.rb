@@ -136,6 +136,19 @@ class SecurityGuardrailsTest < Minitest::Test
     assert_match(%r{uses:\s+sigstore/cosign-installer@d7543c93d881b35a8faa02e8e3605f69b7a1ce62\b}, @dry_run_text)
     assert_includes @dry_run_text, "cosign-release: v2.6.4"
     assert_includes @dry_run_text, "gh attestation verify --help"
+    %w[
+      --cert-identity
+      --cert-oidc-issuer
+      --deny-self-hosted-runners
+      --format
+      --limit
+      --predicate-type
+      --signer-workflow
+      --source-digest
+      --source-ref
+    ].each do |flag|
+      assert_includes @dry_run_text, flag
+    end
     assert_includes @dry_run_text, "Dry-run verifier mutated tracked repository files."
   end
 

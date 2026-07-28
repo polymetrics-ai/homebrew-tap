@@ -74,12 +74,12 @@ ruby test/pm_formula_bump_test.rb
 For a public immutable end-to-end replay, use a temp directory outside tracked
 repo paths and do not provide credentials. If the unauthenticated GitHub API
 rate-limits with HTTP 403, rerun later or use the manual workflow's read-only
-`GITHUB_TOKEN` instead of a local PAT or App credential:
+token instead of a local PAT or App credential:
 
 ```sh
 metadata_dir="$(mktemp -d)"
 trap 'rm -rf "$metadata_dir"' EXIT
-unset GITHUB_TOKEN
+unset GITHUB_TOKEN GH_TOKEN
 ruby scripts/pm_release_verifier.rb verify \
   --dispatch-schema pm-homebrew-release-dry-run/v1 \
   --source-repo polymetrics-ai/cli \
