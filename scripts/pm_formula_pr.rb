@@ -236,6 +236,9 @@ module PMFormulaPR
       verification = JSON.parse(File.read(resolved))
       fail Error, "verification must be a JSON object" unless verification.is_a?(Hash)
       fail Error, "verification schema is unsupported" unless verification["schema"] == PMReleaseVerifier::VERIFICATION_SCHEMA
+      unless verification["dispatch_schema"] == PMReleaseVerifier::FORMULA_DISPATCH_SCHEMA
+        fail Error, "verification dispatch_schema must be #{PMReleaseVerifier::FORMULA_DISPATCH_SCHEMA}"
+      end
       fail Error, "verification metadata does not match formula metadata" unless verification["metadata"] == metadata
       unless verification["source_repo"] == PMFormulaBump::SOURCE_REPO && verification["tag"] == metadata.fetch("tag")
         fail Error, "verification source does not match formula metadata"

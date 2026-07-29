@@ -95,6 +95,8 @@ class SecurityGuardrailsTest < Minitest::Test
 
   def test_unauthorized_pull_requests_are_commented_closed_and_cannot_satisfy_check
     assert_includes @auth_text, "This pull request did not satisfy the authorization policy"
+    refute_includes @auth_text, "cat <<COMMENT"
+    assert_includes @auth_text, "body=\"$(printf '%s\\n\\n%s\\n\\n%s %s\\n\\n%s\\n'"
     assert_includes @auth_text, 'if ! gh api "repos/polymetrics-ai/homebrew-tap/pulls/${PR_NUMBER}/reviews"'
     assert_includes @auth_text, "--field event=COMMENT"
     assert_includes @auth_text, "pulls/${PR_NUMBER}"
@@ -211,6 +213,8 @@ class SecurityGuardrailsTest < Minitest::Test
     assert_includes prepare_section, "GH_TOKEN: ${{ steps.app-token.outputs.token }}"
     assert_includes prepare_section, "persist-credentials: false"
     assert_includes prepare_section, "ruby scripts/pm_formula_pr.rb prepare"
+    assert_includes prepare_section, "inputs.dispatch_schema == 'pm-homebrew-formula/v1'"
+    assert_includes prepare_section, "needs.validate-release.outputs.dispatch_schema == 'pm-homebrew-formula/v1'"
     assert_includes prepare_section, "inputs.dry_run == 'false'"
     refute_includes @formula_update_text, "PERSONAL_ACCESS_TOKEN"
     refute_includes @formula_update_text, " PAT"

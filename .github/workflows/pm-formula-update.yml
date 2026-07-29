@@ -61,6 +61,7 @@ jobs:
       contents: read
     outputs:
       formula_action: ${{ steps.verify.outputs.formula_action }}
+      dispatch_schema: ${{ steps.verify.outputs.dispatch_schema }}
       metadata_json: ${{ steps.verify.outputs.metadata_json }}
       verification_json: ${{ steps.verify.outputs.verification_json }}
       tag: ${{ steps.verify.outputs.tag }}
@@ -136,6 +137,7 @@ jobs:
           fi
 
           formula_action="$(ruby -rjson -e 'puts JSON.parse(File.read(ARGV.fetch(0))).fetch("formula_action")' "${verification}")"
+          dispatch_schema="$(ruby -rjson -e 'puts JSON.parse(File.read(ARGV.fetch(0))).fetch("dispatch_schema")' "${verification}")"
           tag="$(ruby -rjson -e 'puts JSON.parse(File.read(ARGV.fetch(0))).fetch("tag")' "${verification}")"
           version="$(ruby -rjson -e 'puts JSON.parse(File.read(ARGV.fetch(0))).fetch("version")' "${verification}")"
           metadata_json="$(ruby -rjson -e 'print JSON.generate(JSON.parse(File.read(ARGV.fetch(0))))' "${metadata}")"
@@ -143,6 +145,7 @@ jobs:
 
           {
             echo "formula_action=${formula_action}"
+            echo "dispatch_schema=${dispatch_schema}"
             echo "tag=${tag}"
             echo "version=${version}"
             echo "metadata_json=${metadata_json}"
@@ -167,7 +170,7 @@ jobs:
   prepare-pr:
     name: Prepare deterministic formula PR
     needs: validate-release
-    if: ${{ github.repository == 'polymetrics-ai/homebrew-tap' && github.ref == 'refs/heads/main' && inputs.dry_run == 'false' && needs.validate-release.outputs.formula_action == 'update' }}
+    if: ${{ github.repository == 'polymetrics-ai/homebrew-tap' && github.ref == 'refs/heads/main' && inputs.dispatch_schema == 'pm-homebrew-formula/v1' && inputs.dry_run == 'false' && needs.validate-release.outputs.dispatch_schema == 'pm-homebrew-formula/v1' && needs.validate-release.outputs.formula_action == 'update' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: homebrew-formula-automation

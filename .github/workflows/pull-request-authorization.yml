@@ -125,16 +125,12 @@ jobs:
           fi
 
           reason="$(ruby -rjson -e 'puts JSON.parse(File.read(ARGV.fetch(0))).fetch("reason")' "${decision_json}")"
-          body=$(cat <<COMMENT
-          Thank you for your interest in this public Homebrew tap.
-
-          This repository accepts broad pull requests authored only by `karthik-sivadas`. The `pm-homebrew-pr-bot[bot]` route is limited to same-repository deterministic PM formula branches that modify only `Formula/pm.rb` and `README.md`.
-
-          This pull request did not satisfy the authorization policy: ${reason}
-
-          If you need to report a vulnerability, use the repository private vulnerability reporting workflow described in `SECURITY.md`.
-          COMMENT
-          )
+          body="$(printf '%s\n\n%s\n\n%s %s\n\n%s\n' \
+            'Thank you for your interest in this public Homebrew tap.' \
+            'This repository accepts broad pull requests authored only by `karthik-sivadas`. The `pm-homebrew-pr-bot[bot]` route is limited to same-repository deterministic PM formula branches that modify only `Formula/pm.rb` and `README.md`.' \
+            'This pull request did not satisfy the authorization policy:' \
+            "${reason}" \
+            'If you need to report a vulnerability, use the repository private vulnerability reporting workflow described in `SECURITY.md`.')"
 
           if ! gh api "repos/polymetrics-ai/homebrew-tap/pulls/${PR_NUMBER}/reviews" \
             --method POST \

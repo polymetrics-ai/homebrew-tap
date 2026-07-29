@@ -182,6 +182,26 @@ class PMFormulaPRTest < Minitest::Test
     end
   end
 
+  def test_dry_run_schema_verification_is_refused_without_branch_or_pr_mutation
+    with_work_repo("current") do |work, _remote|
+      prs = FakePullRequests.new
+
+      error = assert_raises(PMFormulaPR::Error) do
+        prepare(
+          work,
+          NEXT_METADATA,
+          prs,
+          verification_overrides: { "dispatch_schema" => PMReleaseVerifier::DRY_RUN_DISPATCH_SCHEMA },
+        )
+      end
+
+      assert_match(/verification dispatch_schema must be pm-homebrew-formula\/v1/, error.message)
+      assert_nil remote_head(work, "pm-release/v0.1.2")
+      assert_empty prs.created
+      assert_empty prs.updated
+    end
+  end
+
   private
 
   class FakePullRequests
@@ -240,9 +260,9 @@ class PMFormulaPRTest < Minitest::Test
     end
   end
 
-  def prepare(work, metadata, prs)
+  def prepare(work, metadata, prs, verification_overrides: {})
     metadata_path = metadata_file(metadata)
-    verification_path = verification_file(metadata)
+    verification_path = verification_file(metadata, verification_overrides: verification_overrides)
     PMFormulaPR::Operations.new(root: work, pull_requests: prs).prepare(
       metadata_path: metadata_path,
       verification_path: verification_path,
@@ -343,11 +363,11 @@ class PMFormulaPRTest < Minitest::Test
     path
   end
 
-  def verification_file(metadata)
+  def verification_file(metadata, verification_overrides: {})
     dir = Dir.mktmpdir("pm-formula-pr-verification-")
     @tmpdirs << dir
     path = File.join(dir, "verification.json")
-    File.write(path, "#{JSON.pretty_generate(verification_hash(metadata))}\n")
+    File.write(path, "#{JSON.pretty_generate(verification_hash(metadata).merge(verification_overrides))}\n")
     path
   end
 
