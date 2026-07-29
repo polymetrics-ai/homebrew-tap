@@ -1,6 +1,9 @@
 # frozen_string_literal: true
 
+require "json"
 require "minitest/autorun"
+require "open3"
+require "tmpdir"
 require "yaml"
 
 class SecurityGuardrailsTest < Minitest::Test
@@ -10,10 +13,12 @@ class SecurityGuardrailsTest < Minitest::Test
   AUTH_WORKFLOW = File.join(ROOT, ".github/workflows/pull-request-authorization.yml").freeze
   HOMEBREW_WORKFLOW = File.join(ROOT, ".github/workflows/homebrew.yml").freeze
   PM_RELEASE_DRY_RUN_WORKFLOW = File.join(ROOT, ".github/workflows/pm-release-dry-run.yml").freeze
+  PM_FORMULA_UPDATE_WORKFLOW = File.join(ROOT, ".github/workflows/pm-formula-update.yml").freeze
   CODEOWNERS = File.join(ROOT, ".github/CODEOWNERS").freeze
   AUTHORIZATION_CONCURRENCY_GROUP = 'pull-request-authorization-\$\{\{ github\.event\.pull_request\.number \}\}'
   HOMEBREW_CONCURRENCY_GROUP = 'homebrew-validation-\$\{\{ github\.ref \}\}'
   PM_RELEASE_DRY_RUN_CONCURRENCY_GROUP = 'pm-release-dry-run-\$\{\{ inputs\.version \}\}'
+  PM_FORMULA_UPDATE_CONCURRENCY_GROUP = 'pm-formula-update-\$\{\{ inputs\.tag \}\}'
 
   FORBIDDEN_WORKFLOW_WRITE_PERMISSIONS = %w[
     actions
@@ -42,12 +47,13 @@ class SecurityGuardrailsTest < Minitest::Test
     @auth_text = File.read(AUTH_WORKFLOW)
     @homebrew_text = File.read(HOMEBREW_WORKFLOW)
     @dry_run_text = File.read(PM_RELEASE_DRY_RUN_WORKFLOW)
+    @formula_update_text = File.read(PM_FORMULA_UPDATE_WORKFLOW)
     @formula_text = File.read(FORMULA)
     @readme_text = File.read(README)
   end
 
   def test_workflows_are_valid_yaml
-    [AUTH_WORKFLOW, HOMEBREW_WORKFLOW, PM_RELEASE_DRY_RUN_WORKFLOW].each do |workflow|
+    [AUTH_WORKFLOW, HOMEBREW_WORKFLOW, PM_RELEASE_DRY_RUN_WORKFLOW, PM_FORMULA_UPDATE_WORKFLOW].each do |workflow|
       assert_kind_of Hash, YAML.safe_load_file(workflow, aliases: false), "#{workflow} should parse as YAML"
     end
   end
@@ -77,14 +83,20 @@ class SecurityGuardrailsTest < Minitest::Test
     end
   end
 
-  def test_authorization_workflow_accepts_only_captain_authored_pull_requests
-    assert_includes @auth_text, "github.event.pull_request.user.login == 'karthik-sivadas'"
-    assert_includes @auth_text, "github.event.pull_request.user.login != 'karthik-sivadas'"
-    assert_includes @auth_text, 'run: echo "Pull request author is authorized."'
+  def test_authorization_workflow_accepts_captain_or_exact_homebrew_bot_route_only
+    assert_includes @auth_text, 'CAPTAIN_LOGIN = "karthik-sivadas"'
+    assert_includes @auth_text, 'BOT_LOGIN = "pm-homebrew-pr-bot[bot]"'
+    assert_includes @auth_text, 'BOT_BRANCH_PATTERN = /\Apm-release\/v'
+    assert_includes @auth_text, 'BOT_CHANGED_FILES = ["Formula/pm.rb", "README.md"].freeze'
+    assert_includes @auth_text, 'head repository must be the same repository'
+    assert_includes @auth_text, 'fork pull requests are not allowed for the automation route'
+    assert_includes @auth_text, 'changed files must be exactly'
   end
 
   def test_unauthorized_pull_requests_are_commented_closed_and_cannot_satisfy_check
-    assert_includes @auth_text, "Comment on and close unauthorized pull requests"
+    assert_includes @auth_text, "This pull request did not satisfy the authorization policy"
+    refute_includes @auth_text, "cat <<COMMENT"
+    assert_includes @auth_text, "body=\"$(printf '%s\\n\\n%s\\n\\n%s %s\\n\\n%s\\n'"
     assert_includes @auth_text, 'if ! gh api "repos/polymetrics-ai/homebrew-tap/pulls/${PR_NUMBER}/reviews"'
     assert_includes @auth_text, "--field event=COMMENT"
     assert_includes @auth_text, "pulls/${PR_NUMBER}"
@@ -109,6 +121,7 @@ class SecurityGuardrailsTest < Minitest::Test
     refute_includes @homebrew_text, "github.event_name"
     assert_includes @homebrew_text, "ruby test/security_guardrails_test.rb"
     assert_includes @homebrew_text, "ruby test/pm_release_verifier_test.rb"
+    assert_includes @homebrew_text, "ruby test/pm_formula_pr_test.rb"
     assert_includes @homebrew_text, "PM source build (${{ matrix.label }})"
     assert_match(/^    timeout-minutes: 60$/, @homebrew_text)
     assert_concurrency_group @homebrew_text, HOMEBREW_CONCURRENCY_GROUP
@@ -163,8 +176,106 @@ class SecurityGuardrailsTest < Minitest::Test
     assert_includes run_blocks, '--release-id "${PM_RELEASE_ID}"'
   end
 
+  def test_pm_formula_update_workflow_is_default_branch_dispatch_with_read_only_github_token
+    assert_includes @formula_update_text, "name: PM formula update"
+    assert_match(/^  workflow_dispatch:$/, @formula_update_text)
+    refute_match(/^\s+push:/, @formula_update_text)
+    refute_match(/^\s+pull_request:/, @formula_update_text)
+    refute_match(/^\s+pull_request_target:/, @formula_update_text)
+    assert_match(/^permissions:\n  attestations: read\n  contents: read\n/m, @formula_update_text)
+    assert_match(/^    permissions:\n      attestations: read\n      contents: read\n/m, @formula_update_text)
+    assert_concurrency_group @formula_update_text, PM_FORMULA_UPDATE_CONCURRENCY_GROUP, cancel_in_progress: false
+    assert_includes @formula_update_text, "github.ref == 'refs/heads/main'"
+    assert_includes @formula_update_text, "github.repository == 'polymetrics-ai/homebrew-tap'"
+
+    (FORBIDDEN_WORKFLOW_WRITE_PERMISSIONS + %w[pull-requests]).each do |permission|
+      refute_match(/^\s+#{Regexp.escape(permission)}:\s*write\b/, @formula_update_text,
+                   "#{permission}: write must not be granted to GITHUB_TOKEN")
+    end
+  end
+
+  def test_pm_formula_update_mints_pr_app_token_only_in_prepare_job_environment
+    validate_section, prepare_and_after = @formula_update_text.split(/^  prepare-pr:\n/, 2)
+    refute_nil prepare_and_after
+    prepare_section = prepare_and_after.split(/^  audit-summary:\n/, 2).first
+
+    refute_includes validate_section, "PM_HOMEBREW_PR_APP_ID"
+    refute_includes validate_section, "PM_HOMEBREW_PR_PRIVATE_KEY"
+    assert_includes prepare_section, "environment: homebrew-formula-automation"
+    assert_match(/^    permissions:\n      contents: read\n/m, prepare_section)
+    assert_includes prepare_section, "Mint pm-homebrew-pr-bot installation token"
+    assert_includes prepare_section, "PM_HOMEBREW_PR_APP_ID: ${{ secrets.PM_HOMEBREW_PR_APP_ID }}"
+    assert_includes prepare_section, "PM_HOMEBREW_PR_PRIVATE_KEY: ${{ secrets.PM_HOMEBREW_PR_PRIVATE_KEY }}"
+    assert_includes prepare_section, 'app["slug"] == "pm-homebrew-pr-bot"'
+    assert_includes prepare_section, '"permissions" => { "contents" => "write", "pull_requests" => "write" }'
+    assert_includes prepare_section, 'allowed_permission_keys = ["contents", "metadata", "pull_requests"]'
+    assert_includes prepare_section, "PM_BRANCH_PUSH_TOKEN: ${{ steps.app-token.outputs.token }}"
+    assert_includes prepare_section, "GH_TOKEN: ${{ steps.app-token.outputs.token }}"
+    assert_includes prepare_section, "persist-credentials: false"
+    assert_includes prepare_section, "ruby scripts/pm_formula_pr.rb prepare"
+    assert_includes prepare_section, "inputs.dispatch_schema == 'pm-homebrew-formula/v1'"
+    assert_includes prepare_section, "needs.validate-release.outputs.dispatch_schema == 'pm-homebrew-formula/v1'"
+    assert_includes prepare_section, "inputs.dry_run == 'false'"
+    refute_includes @formula_update_text, "PERSONAL_ACCESS_TOKEN"
+    refute_includes @formula_update_text, " PAT"
+  end
+
+  def test_pm_formula_update_shell_uses_environment_for_untrusted_inputs
+    %w[dispatch_schema source_repo tag release_id source_run_id target_commitish_policy dry_run].each do |input|
+      assert_includes @formula_update_text, "${{ inputs.#{input} }}"
+    end
+
+    run_blocks = @formula_update_text.scan(/^\s+run: \|\n(?<body>(?:^\s{10}.*\n?)+)/).flatten.join("\n")
+    refute_includes run_blocks, "${{ inputs."
+    assert_includes run_blocks, '--tag "${PM_TAG}"'
+    assert_includes run_blocks, '--release-id "${PM_RELEASE_ID}"'
+  end
+
+  def test_authorization_inline_policy_allows_and_denies_expected_routes
+    allowed_bot = authorization_decision(
+      pr_json(login: "pm-homebrew-pr-bot[bot]", type: "Bot", head_ref: "pm-release/v1.2.3"),
+      file_json("Formula/pm.rb"),
+      file_json("README.md"),
+    )
+    assert allowed_bot.fetch("authorized"), allowed_bot.inspect
+    assert_equal "pm-homebrew-pr-bot", allowed_bot.fetch("route")
+
+    allowed_captain = authorization_decision(pr_json(login: "karthik-sivadas"), file_json(".github/workflows/anything.yml"))
+    assert allowed_captain.fetch("authorized"), allowed_captain.inspect
+    assert_equal "captain", allowed_captain.fetch("route")
+
+    deny_fork = authorization_decision(
+      pr_json(login: "pm-homebrew-pr-bot[bot]", type: "Bot", head_repo: "attacker/homebrew-tap", fork: true, head_ref: "pm-release/v1.2.3"),
+      file_json("Formula/pm.rb"),
+      file_json("README.md"),
+    )
+    refute deny_fork.fetch("authorized")
+    assert_match(/head repository must be the same repository|fork pull requests are not allowed/, deny_fork.fetch("reason"))
+
+    deny_bad_branch = authorization_decision(
+      pr_json(login: "pm-homebrew-pr-bot[bot]", type: "Bot", head_ref: "pm-release/v1.2.3-rc.1"),
+      file_json("Formula/pm.rb"),
+      file_json("README.md"),
+    )
+    refute deny_bad_branch.fetch("authorized")
+    assert_match(/strict stable semver/, deny_bad_branch.fetch("reason"))
+
+    deny_workflow = authorization_decision(
+      pr_json(login: "pm-homebrew-pr-bot[bot]", type: "Bot", head_ref: "pm-release/v1.2.3"),
+      file_json("Formula/pm.rb"),
+      file_json("README.md"),
+      file_json(".github/workflows/homebrew.yml"),
+    )
+    refute deny_workflow.fetch("authorized")
+    assert_match(/changed files must be exactly|\.github paths/, deny_workflow.fetch("reason"))
+
+    deny_public = authorization_decision(pr_json(login: "contributor"), file_json("Formula/pm.rb"), file_json("README.md"))
+    refute deny_public.fetch("authorized")
+    assert_match(/not an approved maintainer or exact Homebrew automation bot/, deny_public.fetch("reason"))
+  end
+
   def test_all_referenced_actions_are_pinned_to_full_commit_shas
-    workflow_text = [@auth_text, @homebrew_text, @dry_run_text].join("\n")
+    workflow_text = [@auth_text, @homebrew_text, @dry_run_text, @formula_update_text].join("\n")
     uses_lines = workflow_text.lines.grep(/^\s*uses:/)
 
     refute_empty uses_lines
@@ -204,6 +315,40 @@ class SecurityGuardrailsTest < Minitest::Test
                           "README commit metadata"),
       build_date: capture(@readme_text, /and build date\s+`([^`]+)`/, "README build date metadata"),
     }
+  end
+
+  def authorization_decision(pr, *files)
+    Dir.mktmpdir("pm-pr-authorization-") do |dir|
+      script = File.join(dir, "authorize.rb")
+      pr_path = File.join(dir, "pr.json")
+      files_path = File.join(dir, "files.json")
+      output_path = File.join(dir, "decision.json")
+      File.write(script, authorization_script)
+      File.write(pr_path, JSON.generate(pr))
+      File.write(files_path, JSON.generate(files))
+      stdout, _stderr, _status = Open3.capture3("ruby", script, pr_path, files_path)
+      File.write(output_path, stdout)
+      JSON.parse(File.read(output_path))
+    end
+  end
+
+  def authorization_script
+    match = @auth_text.match(/# BEGIN PM PR AUTHORIZER\n(?<script>.*?)^\s*# END PM PR AUTHORIZER/m)
+    refute_nil match, "inline authorization script should be extractable for fixture tests"
+    match[:script].lines.map { |line| line.sub(/^          /, "") }.join
+  end
+
+  def pr_json(login:, type: "User", base_repo: "polymetrics-ai/homebrew-tap", base_ref: "main",
+              head_repo: "polymetrics-ai/homebrew-tap", head_ref: "feature", fork: false)
+    {
+      "user" => { "login" => login, "type" => type },
+      "base" => { "ref" => base_ref, "repo" => { "full_name" => base_repo } },
+      "head" => { "ref" => head_ref, "repo" => { "full_name" => head_repo, "fork" => fork } },
+    }
+  end
+
+  def file_json(filename, status: "modified")
+    { "filename" => filename, "status" => status }
   end
 
   def capture(text, pattern, description)

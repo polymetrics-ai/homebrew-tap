@@ -18,12 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Accept captain-authored pull requests
-        if: ${{ github.event.pull_request.user.login == 'karthik-sivadas' }}
-        run: echo "Pull request author is authorized."
-
-      - name: Comment on and close unauthorized pull requests
-        if: ${{ github.event.pull_request.user.login != 'karthik-sivadas' }}
+      - name: Evaluate pull request authorization
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -37,15 +32,105 @@ jobs:
               ;;
           esac
 
-          body=$(cat <<'COMMENT'
-          Thank you for your interest in this public Homebrew tap.
+          pr_json="${RUNNER_TEMP}/pull-request.json"
+          files_json="${RUNNER_TEMP}/pull-request-files.json"
+          decision_json="${RUNNER_TEMP}/pull-request-authorization.json"
+          authorizer="${RUNNER_TEMP}/pm-pr-authorize.rb"
 
-          This repository accepts pull requests authored only by `karthik-sivadas`.
-          GitHub cannot prevent public pull request creation, so unauthorized PRs are closed automatically without checking out or executing contributor code.
+          gh api "repos/polymetrics-ai/homebrew-tap/pulls/${PR_NUMBER}" > "${pr_json}"
+          gh api --paginate --slurp "repos/polymetrics-ai/homebrew-tap/pulls/${PR_NUMBER}/files?per_page=100" > "${files_json}"
 
-          If you need to report a vulnerability, use the repository private vulnerability reporting workflow described in `SECURITY.md`.
-          COMMENT
-          )
+          cat > "${authorizer}" <<'RUBY'
+          # BEGIN PM PR AUTHORIZER
+          require "json"
+
+          REPOSITORY = "polymetrics-ai/homebrew-tap"
+          BASE_BRANCH = "main"
+          CAPTAIN_LOGIN = "karthik-sivadas"
+          BOT_LOGIN = "pm-homebrew-pr-bot[bot]"
+          BOT_BRANCH_PATTERN = /\Apm-release\/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\z/
+          BOT_CHANGED_FILES = ["Formula/pm.rb", "README.md"].freeze
+          FORBIDDEN_SECURITY_PATHS = [
+            ".github/CODEOWNERS",
+            "SECURITY.md",
+            "test/security_guardrails_test.rb",
+          ].freeze
+
+          def finish(authorized:, route:, reason:)
+            puts JSON.pretty_generate(
+              "authorized" => authorized,
+              "route" => route,
+              "reason" => reason,
+            )
+            exit(authorized ? 0 : 1)
+          end
+
+          def pages_to_files(json)
+            return json.flatten if json.is_a?(Array)
+
+            finish(authorized: false, route: "invalid", reason: "pull request files response was not an array")
+          end
+
+          pr = JSON.parse(File.read(ARGV.fetch(0)))
+          files = pages_to_files(JSON.parse(File.read(ARGV.fetch(1))))
+          login = pr.dig("user", "login")
+          user_type = pr.dig("user", "type")
+
+          if login == CAPTAIN_LOGIN
+            finish(authorized: true, route: "captain", reason: "captain-authored pull request")
+          end
+
+          unless login == BOT_LOGIN && user_type == "Bot"
+            finish(authorized: false, route: "public", reason: "pull request author is not an approved maintainer or exact Homebrew automation bot")
+          end
+
+          errors = []
+          errors << "base repository must be #{REPOSITORY}" unless pr.dig("base", "repo", "full_name") == REPOSITORY
+          errors << "base branch must be #{BASE_BRANCH}" unless pr.dig("base", "ref") == BASE_BRANCH
+          errors << "head repository must be the same repository" unless pr.dig("head", "repo", "full_name") == REPOSITORY
+          errors << "fork pull requests are not allowed for the automation route" unless pr.dig("head", "repo", "fork") == false
+
+          head_ref = pr.dig("head", "ref")
+          errors << "head branch must be pm-release/vX.Y.Z with strict stable semver" unless head_ref.is_a?(String) && BOT_BRANCH_PATTERN.match?(head_ref)
+
+          file_names = files.map { |file| file["filename"] }
+          unless file_names.all? { |name| name.is_a?(String) }
+            errors << "changed-file metadata must include filenames"
+          end
+          if file_names.sort != BOT_CHANGED_FILES.sort
+            errors << "changed files must be exactly #{BOT_CHANGED_FILES.join(", ")}"
+          end
+
+          files.each do |file|
+            name = file["filename"].to_s
+            errors << "automation route cannot modify .github paths" if name.start_with?(".github/")
+            errors << "automation route cannot modify security guardrails or policy files" if FORBIDDEN_SECURITY_PATHS.include?(name)
+            if file["status"] != "modified" || file.key?("previous_filename")
+              errors << "automation route can only modify existing allowlisted files"
+            end
+          end
+
+          if errors.empty?
+            finish(authorized: true, route: "pm-homebrew-pr-bot", reason: "strict bot branch and file allowlist matched")
+          end
+
+          finish(authorized: false, route: "pm-homebrew-pr-bot", reason: errors.uniq.join("; "))
+          # END PM PR AUTHORIZER
+          RUBY
+
+          if ruby "${authorizer}" "${pr_json}" "${files_json}" > "${decision_json}"; then
+            cat "${decision_json}"
+            echo "Pull request is authorized."
+            exit 0
+          fi
+
+          reason="$(ruby -rjson -e 'puts JSON.parse(File.read(ARGV.fetch(0))).fetch("reason")' "${decision_json}")"
+          body="$(printf '%s\n\n%s\n\n%s %s\n\n%s\n' \
+            'Thank you for your interest in this public Homebrew tap.' \
+            'This repository accepts broad pull requests authored only by `karthik-sivadas`. The `pm-homebrew-pr-bot[bot]` route is limited to same-repository deterministic PM formula branches that modify only `Formula/pm.rb` and `README.md`.' \
+            'This pull request did not satisfy the authorization policy:' \
+            "${reason}" \
+            'If you need to report a vulnerability, use the repository private vulnerability reporting workflow described in `SECURITY.md`.')"
 
           if ! gh api "repos/polymetrics-ai/homebrew-tap/pulls/${PR_NUMBER}/reviews" \
             --method POST \
@@ -58,5 +143,5 @@ jobs:
             --method PATCH \
             --field state=closed
 
-          echo "Pull request author is not authorized for this repository." >&2
+          echo "Pull request is not authorized for this repository: ${reason}" >&2
           exit 1

@@ -35,6 +35,7 @@ class PMReleaseVerifierTest < Minitest::Test
       assert_equal PMReleaseVerifier::VERIFICATION_SCHEMA, summary.fetch("schema")
       assert_equal VALID_METADATA, summary.fetch("metadata")
       assert_equal "dry-run: Formula/pm.rb and README.md already match metadata", summary.fetch("formula_dry_run")
+      assert_equal "already-current", summary.fetch("formula_action")
       assert_equal 22, summary.dig("release_assets", "asset_count")
       assert_equal 11, summary.dig("release_assets", "signed_subject_count")
       signed_names = PMReleaseVerifier.signed_subject_names(VALID_METADATA.fetch("version"))
@@ -51,6 +52,16 @@ class PMReleaseVerifierTest < Minitest::Test
     end
   end
 
+  def test_verify_accepts_formula_update_dispatch_schema
+    with_repo_fixture("current") do |repo|
+      fixture = SyntheticRelease.new
+      summary = verify(repo, fixture, dispatch_schema: PMReleaseVerifier::FORMULA_DISPATCH_SCHEMA)
+
+      assert_equal PMReleaseVerifier::FORMULA_DISPATCH_SCHEMA, summary.fetch("dispatch_schema")
+      assert_equal "already-current", summary.fetch("formula_action")
+    end
+  end
+
   def test_verify_older_formula_reports_would_update_without_mutation
     with_repo_fixture("v0.1.0") do |repo|
       before_formula = File.read(File.join(repo, "Formula/pm.rb"))
@@ -59,10 +70,42 @@ class PMReleaseVerifierTest < Minitest::Test
       summary = verify(repo, fixture)
 
       assert_equal "dry-run: would update Formula/pm.rb and README.md", summary.fetch("formula_dry_run")
+      assert_equal "update", summary.fetch("formula_action")
       assert_equal before_formula, File.read(File.join(repo, "Formula/pm.rb"))
       assert_equal before_readme, File.read(File.join(repo, "README.md"))
       assert_equal "", git(repo, "status", "--porcelain=v1", "--untracked-files=no")
     end
+  end
+
+  def test_cli_accepts_stable_tag_for_formula_update_workflow
+    captured = nil
+    operations = Object.new
+    operations.define_singleton_method(:verify) do |**options|
+      captured = options
+      { "ok" => true }
+    end
+
+    stdout, stderr = capture_io do
+      assert_equal 0,
+                   PMReleaseVerifier::CLI.new(
+                     [
+                       "verify",
+                       "--dispatch-schema", PMReleaseVerifier::FORMULA_DISPATCH_SCHEMA,
+                       "--source-repo", PMReleaseVerifier::SOURCE_REPO,
+                       "--tag", "v0.1.1",
+                       "--metadata-out", "/tmp/metadata.json",
+                       "--verification-out", "/tmp/verification.json",
+                       "--formula", "Formula/pm.rb",
+                       "--readme", "README.md",
+                     ],
+                     operations: operations,
+                   ).run
+    end
+
+    assert_empty stderr
+    assert_equal "0.1.1", captured.fetch(:version)
+    assert_equal PMReleaseVerifier::FORMULA_DISPATCH_SCHEMA, captured.fetch(:dispatch_schema)
+    assert_equal({ "ok" => true }, JSON.parse(stdout))
   end
 
   def test_rejects_invalid_untrusted_inputs

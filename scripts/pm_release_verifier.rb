@@ -18,7 +18,10 @@ require_relative "pm_formula_bump"
 module PMReleaseVerifier
   class Error < PMFormulaBump::Error; end
 
-  DISPATCH_SCHEMA = "pm-homebrew-release-dry-run/v1"
+  DRY_RUN_DISPATCH_SCHEMA = "pm-homebrew-release-dry-run/v1"
+  FORMULA_DISPATCH_SCHEMA = "pm-homebrew-formula/v1"
+  DISPATCH_SCHEMA = DRY_RUN_DISPATCH_SCHEMA
+  DISPATCH_SCHEMAS = [DRY_RUN_DISPATCH_SCHEMA, FORMULA_DISPATCH_SCHEMA].freeze
   VERIFICATION_SCHEMA = "pm-homebrew-release-verification/v1"
   SOURCE_REPO = PMFormulaBump::SOURCE_REPO
   RELEASE_WORKFLOW_IDENTITY_PREFIX = "https://github.com/#{SOURCE_REPO}/.github/workflows/release.yml@"
@@ -350,11 +353,10 @@ module PMReleaseVerifier
 
   class Inputs
     def initialize(dispatch_schema:, source_repo:, version:, release_id:, source_run_id:, target_commitish_policy:)
-      @dispatch_schema = PMReleaseVerifier.validate_string!(
-        dispatch_schema,
-        "dispatch_schema",
-        expected: DISPATCH_SCHEMA,
-      )
+      @dispatch_schema = PMReleaseVerifier.validate_string!(dispatch_schema, "dispatch_schema")
+      unless DISPATCH_SCHEMAS.include?(@dispatch_schema)
+        fail Error, "dispatch_schema must be one of: #{DISPATCH_SCHEMAS.join(", ")}"
+      end
       @source_repo = PMReleaseVerifier.validate_string!(source_repo, "source_repo", expected: SOURCE_REPO)
       @version = PMReleaseVerifier.validate_stable_version!(version)
       @tag = PMReleaseVerifier.tag_for_version(@version)
@@ -781,6 +783,7 @@ module PMReleaseVerifier
       target_commitish_policy
       source_run_id
       formula_dry_run
+      formula_action
       metadata
       release_assets
     ].freeze
@@ -818,11 +821,16 @@ module PMReleaseVerifier
       )
 
       write_file(metadata_path, PMFormulaBump.stable_json(metadata))
-      formula_dry_run = @formula_operations.apply(
+      formula_state = @formula_operations.status(
         metadata_path: metadata_path,
         formula_path: formula_path,
         readme_path: readme_path,
-        write: false,
+      )
+      formula_dry_run = dry_run_formula_change(
+        formula_state,
+        metadata_path: metadata_path,
+        formula_path: formula_path,
+        readme_path: readme_path,
       )
 
       summary = stable_summary(
@@ -835,6 +843,7 @@ module PMReleaseVerifier
         "target_commitish_policy" => inputs.target_commitish_policy,
         "source_run_id" => inputs.source_run_id,
         "formula_dry_run" => formula_dry_run.chomp,
+        "formula_action" => formula_state.fetch("action"),
         "metadata" => metadata,
         "release_assets" => release_assets,
       )
@@ -843,6 +852,22 @@ module PMReleaseVerifier
     end
 
     private
+
+    def dry_run_formula_change(formula_state, metadata_path:, formula_path:, readme_path:)
+      case formula_state.fetch("action")
+      when PMFormulaBump::FormulaState::ACTION_ALREADY_CURRENT, PMFormulaBump::FormulaState::ACTION_UPDATE
+        @formula_operations.apply(
+          metadata_path: metadata_path,
+          formula_path: formula_path,
+          readme_path: readme_path,
+          write: false,
+        )
+      when PMFormulaBump::FormulaState::ACTION_NEWER_FORMULA
+        "dry-run: #{formula_state.fetch("message")}; no formula branch will be prepared\n"
+      else
+        fail Error, formula_state.fetch("message")
+      end
+    end
 
     def output_path(path, description)
       resolved = @paths.metadata_path(path, description)
@@ -899,11 +924,12 @@ module PMReleaseVerifier
       }
       parser = OptionParser.new do |opts|
         opts.banner = <<~BANNER.chomp
-          Usage: #{$PROGRAM_NAME} verify --dispatch-schema #{DISPATCH_SCHEMA} --source-repo #{SOURCE_REPO} --version X.Y.Z --metadata-out <path> --verification-out <path> --formula Formula/pm.rb --readme README.md
+          Usage: #{$PROGRAM_NAME} verify --dispatch-schema #{DRY_RUN_DISPATCH_SCHEMA} --source-repo #{SOURCE_REPO} (--version X.Y.Z | --tag vX.Y.Z) --metadata-out <path> --verification-out <path> --formula Formula/pm.rb --readme README.md
         BANNER
         opts.on("--dispatch-schema SCHEMA") { |value| options[:dispatch_schema] = value }
         opts.on("--source-repo REPO") { |value| options[:source_repo] = value }
         opts.on("--version VERSION") { |value| options[:version] = value }
+        opts.on("--tag TAG") { |value| options[:tag] = value }
         opts.on("--release-id ID") { |value| options[:release_id] = value }
         opts.on("--source-run-id ID") { |value| options[:source_run_id] = value }
         opts.on("--target-commitish-policy POLICY") { |value| options[:target_commitish_policy] = value }
@@ -914,6 +940,9 @@ module PMReleaseVerifier
       end
       parser.parse!(@argv)
       fail Error, "unexpected positional arguments: #{@argv.join(" ")}" unless @argv.empty?
+
+      fail Error, "--version and --tag are mutually exclusive" if options[:version] && options[:tag]
+      options[:version] = PMFormulaBump.version_from_tag(options.delete(:tag)) if options[:tag]
 
       %i[dispatch_schema source_repo version metadata_out verification_out formula_path readme_path].each do |key|
         fail Error, "--#{key.to_s.tr("_", "-")} is required" unless options[key]

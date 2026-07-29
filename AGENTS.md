@@ -1,8 +1,8 @@
 # Project agent memory
 
-- This repository is a Homebrew tap. Keep formula implementation details in `Formula/pm.rb`, validation in `.github/workflows/homebrew.yml`, and future PM release-bump steps in `docs/formula-bump.md`.
+- This repository is a Homebrew tap. Keep formula implementation details in `Formula/pm.rb`, validation in `.github/workflows/homebrew.yml`, and PM release-bump operations in `docs/formula-bump.md`.
 - PM formula updates must use immutable `polymetrics-ai/cli` tag archives with checked SHA-256 values and linker metadata that matches the upstream release; prefer `scripts/pm_formula_bump.rb` and `docs/formula-bump.md` for deterministic bumps.
-- Before any formula automation branch/PR mutation, use the tap-owned dry-run verifier in `.github/workflows/pm-release-dry-run.yml` / `scripts/pm_release_verifier.rb`; operator notes live in `docs/pm-release-dry-run.md`.
+- Before any formula automation branch/PR mutation, use the tap-owned dry-run verifier in `.github/workflows/pm-release-dry-run.yml` / `scripts/pm_release_verifier.rb`; branch/PR creation is limited to `.github/workflows/pm-formula-update.yml` and `scripts/pm_formula_pr.rb`; operator notes live in `docs/pm-release-dry-run.md` and `docs/formula-bump.md`.
 - Do not add casks, bottles, signing/notarization credentials, release-asset installers, release-write workflow permissions, or self-hosted runner usage without separate approval.
 - Repository security guardrails live in `.github/CODEOWNERS`, `.github/workflows/pull-request-authorization.yml`, `SECURITY.md`, and `test/security_guardrails_test.rb`; keep the public tap installable and do not require a self-impossible code-owner approval.
 

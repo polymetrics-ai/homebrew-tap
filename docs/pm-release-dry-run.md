@@ -56,9 +56,10 @@ A successful run writes two JSON blocks to the GitHub step summary:
 - **Deterministic formula metadata**: the exact version, source URL, source
   SHA-256, tag commit, and build date that a future formula branch would use.
 
-Success means the released PM version is eligible for a later formula-update
-branch/PR slice. It does **not** create or update a branch, commit, PR, formula,
-README, release, tag, bottle, cask, secret, App, or repository setting.
+Success means the released PM version is eligible for the formula-update
+branch/PR path documented in [`formula-bump.md`](formula-bump.md). It does
+**not** create or update a branch, commit, PR, formula, README, release, tag,
+bottle, cask, secret, App, or repository setting.
 
 ## Local development
 
@@ -69,6 +70,7 @@ command on `PATH`. Run the focused tests with:
 ruby test/pm_release_verifier_test.rb
 ruby test/security_guardrails_test.rb
 ruby test/pm_formula_bump_test.rb
+ruby test/pm_formula_pr_test.rb
 ```
 
 For a public immutable end-to-end replay, use a temp directory outside tracked

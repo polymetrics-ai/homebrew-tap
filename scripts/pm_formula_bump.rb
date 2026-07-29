@@ -551,6 +551,92 @@ module PMFormulaBump
     end
   end
 
+  class FormulaState
+    ACTION_ALREADY_CURRENT = "already-current"
+    ACTION_UPDATE = "update"
+    ACTION_NEWER_FORMULA = "newer-formula"
+    ACTION_METADATA_CONFLICT = "metadata-conflict"
+
+    def self.classify(formula_text, readme_text, metadata)
+      formula_metadata = FormulaEditor.metadata(formula_text)
+      readme_metadata = ReadmeEditor.metadata(readme_text)
+      drift = drift_keys(formula_metadata, readme_metadata)
+      unless drift.empty?
+        return result(
+          ACTION_METADATA_CONFLICT,
+          formula_metadata,
+          metadata,
+          "current Formula/pm.rb and README.md drift from release metadata: #{drift.join(", ")}",
+        )
+      end
+
+      version_comparison = PMFormulaBump.compare_versions(
+        formula_metadata.fetch("version"),
+        metadata.fetch("version"),
+      )
+      case version_comparison
+      when 1
+        result(
+          ACTION_NEWER_FORMULA,
+          formula_metadata,
+          metadata,
+          "refusing to downgrade formula from #{formula_metadata.fetch("version")} to #{metadata.fetch("version")}",
+        )
+      when 0
+        classify_same_version(formula_metadata, readme_metadata, metadata)
+      else
+        result(
+          ACTION_UPDATE,
+          formula_metadata,
+          metadata,
+          "Formula/pm.rb and README.md can be updated from #{formula_metadata.fetch("version")} to #{metadata.fetch("version")}",
+        )
+      end
+    end
+
+    def self.classify_same_version(formula_metadata, readme_metadata, metadata)
+      expected = file_metadata(metadata)
+      formula_drift = drift_keys(formula_metadata, expected)
+      readme_drift = drift_keys(readme_metadata, expected)
+      return result(ACTION_ALREADY_CURRENT, formula_metadata, metadata, "Formula/pm.rb and README.md already match metadata") if formula_drift.empty? && readme_drift.empty?
+
+      messages = []
+      messages << "same-version Formula/pm.rb drift from release metadata: #{formula_drift.join(", ")}" unless formula_drift.empty?
+      messages << "same-version README.md drift from release metadata: #{readme_drift.join(", ")}" unless readme_drift.empty?
+      result(ACTION_METADATA_CONFLICT, formula_metadata, metadata, messages.join("; "))
+    end
+    private_class_method :classify_same_version
+
+    def self.drift_keys(actual, expected)
+      expected.keys.each_with_object([]) do |key, result|
+        result << key unless actual[key] == expected[key]
+      end
+    end
+    private_class_method :drift_keys
+
+    def self.file_metadata(metadata)
+      {
+        "source_url" => metadata.fetch("source_url"),
+        "source_sha256" => metadata.fetch("source_sha256"),
+        "version" => metadata.fetch("version"),
+        "commit" => metadata.fetch("commit"),
+        "build_date" => metadata.fetch("build_date"),
+      }
+    end
+    private_class_method :file_metadata
+
+    def self.result(action, current_metadata, target_metadata, message)
+      {
+        "action" => action,
+        "current_version" => current_metadata.fetch("version"),
+        "target_version" => target_metadata.fetch("version"),
+        "tag" => target_metadata.fetch("tag"),
+        "message" => message,
+      }
+    end
+    private_class_method :result
+  end
+
   class Operations
     def initialize(root: PMFormulaBump.default_root, planner: Planner.new)
       @root = File.realpath(root)
@@ -614,6 +700,14 @@ module PMFormulaBump
       "Formula/pm.rb and README.md match metadata\n"
     end
 
+    def status(metadata_path:, formula_path:, readme_path:)
+      metadata = load_metadata(metadata_path)
+      formula = @paths.allowed_path(formula_path, "Formula/pm.rb")
+      readme = @paths.allowed_path(readme_path, "README.md")
+
+      FormulaState.classify(File.read(formula), File.read(readme), metadata)
+    end
+
     private
 
     def load_metadata(path)
@@ -626,19 +720,10 @@ module PMFormulaBump
     end
 
     def assert_current_files_are_safe_to_update!(formula_text, readme_text, metadata)
-      formula_metadata = FormulaEditor.metadata(formula_text)
-      readme_metadata = ReadmeEditor.metadata(readme_text)
-      assert_metadata_equal!("current Formula/pm.rb and README.md", formula_metadata, readme_metadata)
+      state = FormulaState.classify(formula_text, readme_text, metadata)
+      return if [FormulaState::ACTION_ALREADY_CURRENT, FormulaState::ACTION_UPDATE].include?(state.fetch("action"))
 
-      version_comparison = PMFormulaBump.compare_versions(formula_metadata.fetch("version"), metadata.fetch("version"))
-      case version_comparison
-      when 1
-        fail Error, "refusing to downgrade formula from #{formula_metadata.fetch("version")} to #{metadata.fetch("version")}"
-      when 0
-        expected = file_metadata(metadata)
-        assert_metadata_equal!("same-version Formula/pm.rb", formula_metadata, expected)
-        assert_metadata_equal!("same-version README.md", readme_metadata, expected)
-      end
+      fail Error, state.fetch("message")
     end
 
     def assert_metadata_equal!(description, actual, expected)

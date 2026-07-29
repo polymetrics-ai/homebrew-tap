@@ -79,7 +79,7 @@ brew untap polymetrics-ai/tap
 - Homebrew validation workflow: [`.github/workflows/homebrew.yml`](.github/workflows/homebrew.yml)
 - Contribution and vulnerability policy: [`SECURITY.md`](SECURITY.md)
 - Release dry-run verification: [`docs/pm-release-dry-run.md`](docs/pm-release-dry-run.md)
-- Future formula bump procedure: [`docs/formula-bump.md`](docs/formula-bump.md)
+- Formula bump and automation procedure: [`docs/formula-bump.md`](docs/formula-bump.md)
 
 The validation workflow uses only GitHub-hosted public-repository labels:
 `ubuntu-latest` (x64 Linux), `macos-15` (arm64 macOS), and `macos-15-intel`
