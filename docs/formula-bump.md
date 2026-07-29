@@ -9,7 +9,66 @@ that work has been separately approved.
 Before any automated formula branch or PR mutation, run the tap-owned manual
 `PM release dry-run verification` workflow documented in
 [`pm-release-dry-run.md`](pm-release-dry-run.md). Treat a successful dry-run as a
-prerequisite for the later formula-update branch/PR slice.
+prerequisite for the formula-update branch/PR path.
+
+The current `PM formula update` workflow repeats the same release verification
+before preparing a PR. Use `dry_run=true` for safe manual replays; a successful
+`v0.1.1` replay is expected to report `already-current` against the current
+formula and must not create a remote branch or PR.
+
+## Automated formula PR path
+
+After the upstream PM release-assets job has completed and a dry-run has proved
+the immutable release evidence, dispatch `.github/workflows/pm-formula-update.yml`
+on `main` with `dispatch_schema=pm-homebrew-formula/v1`, `source_repo=polymetrics-ai/cli`,
+`tag=vX.Y.Z`, and `dry_run=false`. Optional `release_id` and `source_run_id`
+inputs are cross-checks only; the workflow re-queries GitHub and derives the
+Formula/README metadata from the immutable tag, release assets, checksums,
+Cosign bundles, GitHub attestations, and source archive.
+
+The default-branch workflow keeps its `GITHUB_TOKEN` read-only. Only the
+`prepare-pr` job uses the protected `homebrew-formula-automation` environment to
+mint a short-lived `pm-homebrew-pr-bot` installation token. That token may create
+or converge exactly one same-repository branch, `pm-release/vX.Y.Z`, and one
+matching PR; it is not permitted or expected to update `main`, bypass branch
+protection, publish bottles/casks, or expose secret values in logs.
+
+Expected idempotence states:
+
+- `already-current`: success no-op; no branch/PR mutation.
+- `newer-formula`: no downgrade; no branch/PR mutation.
+- `metadata-conflict`: fail for manual review; no branch/PR mutation.
+- absent deterministic branch: create `pm-release/vX.Y.Z`, commit generated
+  `Formula/pm.rb` and `README.md`, and open the matching PR.
+- duplicate dispatch/existing open PR: reuse the exact deterministic branch and
+  update the existing PR body rather than creating another PR.
+- stale bot-owned deterministic branch: reset only with `--force-with-lease`
+  after the branch contents already match the verified metadata and the branch
+  contains only bot-authored allowlisted formula/README changes.
+- human-authored, forked, divergent, workflow, CODEOWNERS, security, or policy
+  changes: refuse or auto-close through PR authorization without checkout of PR
+  code.
+
+## Retry, rollback, and manual fallback
+
+- **Validation fails before mutation:** fix the release, verifier, or dispatch
+  input and rerun `dry_run=true`. No branch exists.
+- **Automation fails after branch creation:** rerun the same `dry_run=false`
+  dispatch. The workflow is version-concurrent and converges the deterministic
+  branch/PR instead of creating duplicates.
+- **Bot PR is wrong:** close the PR, delete only the `pm-release/vX.Y.Z` branch
+  after inspection, fix the workflow/script/tests, and rerun from `dry_run=true`.
+  Do not retag or push to `main`.
+- **Bad formula merges:** open a normal maintainer PR reverting the formula
+  commit or restoring the last known-good immutable tag, checksum, and linker
+  metadata. Do not grant either App branch-protection bypass.
+- **App token/key issue:** revoke/rotate the App private key through GitHub,
+  update the protected environment secrets by name, close suspect bot branches,
+  and audit workflow logs. Do not paste key or token values into issues, PRs, or
+  docs.
+- **Workflow disabled, App installation removed, or protected environment
+  unavailable:** use the manual deterministic tooling below and open a normal
+  maintainer-reviewed PR until the automation environment is restored.
 
 ## Preferred deterministic tooling
 

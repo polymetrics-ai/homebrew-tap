@@ -1,0 +1,327 @@
+name: PM formula update
+
+on:
+  workflow_dispatch:
+    inputs:
+      dispatch_schema:
+        description: Formula update input schema. Keep the default unless the workflow has been upgraded.
+        required: true
+        type: string
+        default: pm-homebrew-formula/v1
+      source_repo:
+        description: Upstream PM repository. Must be polymetrics-ai/cli.
+        required: true
+        type: string
+        default: polymetrics-ai/cli
+      tag:
+        description: Stable PM tag with leading v, for example v0.1.1.
+        required: true
+        type: string
+      release_id:
+        description: Optional GitHub Release id to cross-check against the tag release.
+        required: false
+        type: string
+      source_run_id:
+        description: Optional upstream Release workflow run id expected in certificate evidence.
+        required: false
+        type: string
+      target_commitish_policy:
+        description: Ignore target_commitish by default; require a matching full SHA only for strict audits.
+        required: true
+        type: choice
+        default: ignore
+        options:
+          - ignore
+          - require-full-sha
+      dry_run:
+        description: Keep true for manual verification; false allows the App-owned branch and PR path.
+        required: true
+        type: choice
+        default: "true"
+        options:
+          - "true"
+          - "false"
+
+permissions:
+  attestations: read
+  contents: read
+
+concurrency:
+  group: "pm-formula-update-${{ inputs.tag }}"
+  cancel-in-progress: false
+
+jobs:
+  validate-release:
+    name: Validate PM release evidence
+    if: ${{ github.repository == 'polymetrics-ai/homebrew-tap' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      attestations: read
+      contents: read
+    outputs:
+      formula_action: ${{ steps.verify.outputs.formula_action }}
+      metadata_json: ${{ steps.verify.outputs.metadata_json }}
+      verification_json: ${{ steps.verify.outputs.verification_json }}
+      tag: ${{ steps.verify.outputs.tag }}
+      version: ${{ steps.verify.outputs.version }}
+
+    steps:
+      - name: Check out tap main
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@d7543c93d881b35a8faa02e8e3605f69b7a1ce62 # v3.10.0
+        with:
+          cosign-release: v2.6.4
+
+      - name: Verify released PM tag
+        id: verify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          PM_DISPATCH_SCHEMA: ${{ inputs.dispatch_schema }}
+          PM_SOURCE_REPO: ${{ inputs.source_repo }}
+          PM_TAG: ${{ inputs.tag }}
+          PM_RELEASE_ID: ${{ inputs.release_id }}
+          PM_SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          PM_TARGET_COMMITISH_POLICY: ${{ inputs.target_commitish_policy }}
+          PM_DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+
+          metadata="${RUNNER_TEMP}/pm-formula-metadata.json"
+          verification="${RUNNER_TEMP}/pm-release-verification.json"
+
+          cosign version >/dev/null
+          if ! gh_attestation_help="$(gh attestation verify --help 2>&1)"; then
+            printf '%s\n' "${gh_attestation_help}" >&2
+            exit 1
+          fi
+          for required_flag in \
+            --cert-identity \
+            --cert-oidc-issuer \
+            --deny-self-hosted-runners \
+            --format \
+            --limit \
+            --predicate-type \
+            --source-digest \
+            --source-ref
+          do
+            if [[ "${gh_attestation_help}" != *"${required_flag}"* ]]; then
+              echo "GitHub CLI attestation verifier is missing ${required_flag} support." >&2
+              exit 1
+            fi
+          done
+
+          ruby scripts/pm_release_verifier.rb verify \
+            --dispatch-schema "${PM_DISPATCH_SCHEMA}" \
+            --source-repo "${PM_SOURCE_REPO}" \
+            --tag "${PM_TAG}" \
+            --release-id "${PM_RELEASE_ID}" \
+            --source-run-id "${PM_SOURCE_RUN_ID}" \
+            --target-commitish-policy "${PM_TARGET_COMMITISH_POLICY}" \
+            --metadata-out "${metadata}" \
+            --verification-out "${verification}" \
+            --formula Formula/pm.rb \
+            --readme README.md
+
+          if ! git diff --quiet --exit-code || ! git diff --cached --quiet --exit-code; then
+            git status --short
+            echo "Formula update verifier mutated tracked repository files before prepare-pr." >&2
+            exit 1
+          fi
+
+          formula_action="$(ruby -rjson -e 'puts JSON.parse(File.read(ARGV.fetch(0))).fetch("formula_action")' "${verification}")"
+          tag="$(ruby -rjson -e 'puts JSON.parse(File.read(ARGV.fetch(0))).fetch("tag")' "${verification}")"
+          version="$(ruby -rjson -e 'puts JSON.parse(File.read(ARGV.fetch(0))).fetch("version")' "${verification}")"
+          metadata_json="$(ruby -rjson -e 'print JSON.generate(JSON.parse(File.read(ARGV.fetch(0))))' "${metadata}")"
+          verification_json="$(ruby -rjson -e 'print JSON.generate(JSON.parse(File.read(ARGV.fetch(0))))' "${verification}")"
+
+          {
+            echo "formula_action=${formula_action}"
+            echo "tag=${tag}"
+            echo "version=${version}"
+            echo "metadata_json=${metadata_json}"
+            echo "verification_json=${verification_json}"
+          } >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "## PM formula update validation"
+            echo
+            echo "Dry run input: \`${PM_DRY_RUN}\`"
+            echo "Formula action: \`${formula_action}\`"
+            echo
+            echo "No branch, commit, push, pull request, release, tag, bottle, cask, secret, or main-branch mutation was performed by validation."
+            echo
+            echo "### Verification summary"
+            echo
+            echo '```json'
+            ruby -rjson -e 'puts JSON.pretty_generate(JSON.parse(File.read(ARGV.fetch(0))))' "${verification}"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  prepare-pr:
+    name: Prepare deterministic formula PR
+    needs: validate-release
+    if: ${{ github.repository == 'polymetrics-ai/homebrew-tap' && github.ref == 'refs/heads/main' && inputs.dry_run == 'false' && needs.validate-release.outputs.formula_action == 'update' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: homebrew-formula-automation
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out tap main without GITHUB_TOKEN push credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Restore verified metadata
+        env:
+          PM_METADATA_JSON: ${{ needs.validate-release.outputs.metadata_json }}
+          PM_VERIFICATION_JSON: ${{ needs.validate-release.outputs.verification_json }}
+        run: |
+          set -euo pipefail
+          printf '%s' "${PM_METADATA_JSON}" > "${RUNNER_TEMP}/pm-formula-metadata.json"
+          printf '%s' "${PM_VERIFICATION_JSON}" > "${RUNNER_TEMP}/pm-release-verification.json"
+
+      - name: Mint pm-homebrew-pr-bot installation token
+        id: app-token
+        env:
+          PM_HOMEBREW_PR_APP_ID: ${{ secrets.PM_HOMEBREW_PR_APP_ID }}
+          PM_HOMEBREW_PR_PRIVATE_KEY: ${{ secrets.PM_HOMEBREW_PR_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          ruby <<'RUBY'
+          require "base64"
+          require "json"
+          require "net/http"
+          require "openssl"
+          require "time"
+          require "uri"
+
+          def base64url(bytes)
+            Base64.strict_encode64(bytes).tr("+/", "-_").delete("=")
+          end
+
+          def app_request(method, path, jwt, body = nil)
+            uri = URI::HTTPS.build(host: "api.github.com", path: path)
+            request_class = method == :post ? Net::HTTP::Post : Net::HTTP::Get
+            request = request_class.new(uri)
+            request["Accept"] = "application/vnd.github+json"
+            request["Authorization"] = "Bearer #{jwt}"
+            request["X-GitHub-Api-Version"] = "2022-11-28"
+            request["User-Agent"] = "polymetrics-homebrew-tap-formula-update"
+            if body
+              request["Content-Type"] = "application/json"
+              request.body = JSON.generate(body)
+            end
+
+            response = Net::HTTP.start(uri.host, uri.port, use_ssl: true) { |http| http.request(request) }
+            unless response.is_a?(Net::HTTPSuccess)
+              warn "GitHub App token request failed for #{path}: HTTP #{response.code}"
+              exit 1
+            end
+            JSON.parse(response.body)
+          rescue JSON::ParserError
+            warn "GitHub App token request for #{path} returned invalid JSON"
+            exit 1
+          end
+
+          app_id = ENV.fetch("PM_HOMEBREW_PR_APP_ID")
+          private_key = OpenSSL::PKey::RSA.new(ENV.fetch("PM_HOMEBREW_PR_PRIVATE_KEY"))
+          now = Time.now.to_i
+          header = base64url(JSON.generate("alg" => "RS256", "typ" => "JWT"))
+          payload = base64url(JSON.generate("iat" => now - 60, "exp" => now + 540, "iss" => app_id))
+          signing_input = "#{header}.#{payload}"
+          signature = base64url(private_key.sign(OpenSSL::Digest.new("SHA256"), signing_input))
+          jwt = "#{signing_input}.#{signature}"
+
+          app = app_request(:get, "/app", jwt)
+          unless app["slug"] == "pm-homebrew-pr-bot" && app["id"].to_s == app_id
+            warn "GitHub App identity is not the approved pm-homebrew-pr-bot"
+            exit 1
+          end
+
+          installations = app_request(:get, "/app/installations", jwt)
+          installation = installations.find { |item| item.dig("account", "login") == "polymetrics-ai" }
+          unless installation
+            warn "pm-homebrew-pr-bot installation for polymetrics-ai was not found"
+            exit 1
+          end
+
+          token_response = app_request(
+            :post,
+            "/app/installations/#{installation.fetch('id')}/access_tokens",
+            jwt,
+            "repositories" => ["homebrew-tap"],
+            "permissions" => { "contents" => "write", "pull_requests" => "write" },
+          )
+          permissions = token_response.fetch("permissions")
+          allowed_permission_keys = ["contents", "metadata", "pull_requests"]
+          unexpected_permission_keys = permissions.keys - allowed_permission_keys
+          unless permissions["contents"] == "write" &&
+                 permissions["pull_requests"] == "write" &&
+                 [nil, "read"].include?(permissions["metadata"]) &&
+                 unexpected_permission_keys.empty?
+            warn "pm-homebrew-pr-bot token permissions did not match the approved narrow scope"
+            exit 1
+          end
+
+          token = token_response.fetch("token")
+          puts "::add-mask::#{token}"
+          File.open(ENV.fetch("GITHUB_OUTPUT"), "a") { |file| file.puts "token=#{token}" }
+          RUBY
+
+      - name: Create or converge version branch and PR
+        id: prepare
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PM_BRANCH_PUSH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          result="${RUNNER_TEMP}/pm-formula-pr-result.json"
+          ruby scripts/pm_formula_pr.rb prepare \
+            --metadata "${RUNNER_TEMP}/pm-formula-metadata.json" \
+            --verification "${RUNNER_TEMP}/pm-release-verification.json" \
+            --repository polymetrics-ai/homebrew-tap \
+            --remote origin \
+            --base main | tee "${result}"
+
+          {
+            echo "## PM formula PR preparation"
+            echo
+            echo '```json'
+            ruby -rjson -e 'puts JSON.pretty_generate(JSON.parse(File.read(ARGV.fetch(0))))' "${result}"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  audit-summary:
+    name: PM formula update audit summary
+    needs:
+      - validate-release
+      - prepare-pr
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Summarize formula update outcome
+        run: |
+          {
+            echo "## PM formula update outcome"
+            echo
+            echo "- validate-release: \`${{ needs.validate-release.result }}\`"
+            echo "- prepare-pr: \`${{ needs.prepare-pr.result }}\`"
+            echo "- formula action: \`${{ needs.validate-release.outputs.formula_action }}\`"
+            echo "- tag: \`${{ needs.validate-release.outputs.tag }}\`"
+            echo
+            echo "No workflow step may push to \`main\`; formula changes are limited to deterministic \`pm-release/vX.Y.Z\` branches and maintainer-reviewed PRs."
+          } >> "${GITHUB_STEP_SUMMARY}"
