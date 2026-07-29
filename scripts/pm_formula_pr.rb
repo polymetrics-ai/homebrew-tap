@@ -16,6 +16,7 @@ module PMFormulaPR
   TARGET_REPOSITORY = "polymetrics-ai/homebrew-tap"
   BASE_BRANCH = "main"
   BRANCH_PREFIX = "pm-release"
+  TOKEN_ENV_VAR = "PM_BRANCH_PUSH_TOKEN"
   BOT_LOGIN = "pm-homebrew-pr-bot[bot]"
   BOT_APP_ID = "4421666"
   BOT_NAME = BOT_LOGIN
@@ -35,15 +36,24 @@ module PMFormulaPR
     branch
   end
 
+  def required_app_token(env: ENV)
+    token = env.fetch(TOKEN_ENV_VAR, nil)
+    fail Error, "#{TOKEN_ENV_VAR} is required for branch and PR mutations" if token.nil? || token.empty?
+
+    token
+  end
+
   def commit_subject(metadata)
     "#{COMMIT_SUBJECT_PREFIX} #{metadata.fetch("tag")}"
   end
 
   class Git
-    def initialize(root:, push_token: ENV.fetch("PM_BRANCH_PUSH_TOKEN", nil))
+    def initialize(root:, push_token: PMFormulaPR.required_app_token)
+      fail Error, "#{TOKEN_ENV_VAR} is required for branch and PR mutations" if push_token.nil? || push_token.empty?
+
       @root = File.realpath(root)
       @push_token = push_token
-      @basic_auth = push_token.nil? || push_token.empty? ? nil : Base64.strict_encode64("x-access-token:#{push_token}")
+      @basic_auth = Base64.strict_encode64("x-access-token:#{push_token}")
     end
 
     attr_reader :root
@@ -91,12 +101,13 @@ module PMFormulaPR
     end
 
     def push_env
-      return {} if @push_token.nil? || @push_token.empty?
-
       {
-        "GIT_CONFIG_COUNT" => "1",
+        "GIT_TERMINAL_PROMPT" => "0",
+        "GIT_CONFIG_COUNT" => "2",
         "GIT_CONFIG_KEY_0" => "http.https://github.com/.extraheader",
         "GIT_CONFIG_VALUE_0" => "AUTHORIZATION: basic #{@basic_auth}",
+        "GIT_CONFIG_KEY_1" => "credential.helper",
+        "GIT_CONFIG_VALUE_1" => "",
       }
     end
 
@@ -110,8 +121,11 @@ module PMFormulaPR
   end
 
   class PullRequestClient
-    def initialize(repository: TARGET_REPOSITORY)
+    def initialize(repository: TARGET_REPOSITORY, token: PMFormulaPR.required_app_token)
+      fail Error, "#{TOKEN_ENV_VAR} is required for branch and PR mutations" if token.nil? || token.empty?
+
       @repository = repository
+      @token = token
     end
 
     def open_pr_for_branch(branch, base_branch)
@@ -153,17 +167,24 @@ module PMFormulaPR
     private
 
     def gh_json(*args)
-      stdout, stderr, status = Open3.capture3("gh", "api", *args)
+      stdout, stderr, status = Open3.capture3(gh_env, "gh", "api", *args)
       return JSON.parse(stdout) if status.success?
 
       detail = stderr.empty? ? stdout : stderr
-      %w[GH_TOKEN GITHUB_TOKEN PM_BRANCH_PUSH_TOKEN].each do |name|
-        token = ENV[name]
+      [@token, ENV["GH_TOKEN"], ENV["GITHUB_TOKEN"], ENV[TOKEN_ENV_VAR]].uniq.each do |token|
         detail = detail.gsub(token, "[REDACTED]") if token && !token.empty?
       end
       fail Error, "gh api #{args.first} failed: #{detail.lines.first(5).join.strip}"
     rescue JSON::ParserError
       raise Error, "gh api #{args.first} returned invalid JSON"
+    end
+
+    def gh_env
+      {
+        "GH_TOKEN" => @token,
+        "GITHUB_TOKEN" => nil,
+        "GH_PROMPT_DISABLED" => "1",
+      }
     end
   end
 
@@ -368,12 +389,19 @@ module PMFormulaPR
       body = pr_body(metadata, verification)
       existing = @pull_requests.open_pr_for_branch(branch, base_branch)
       if existing
+        assert_bot_authored_pr!(existing, branch)
         updated = @pull_requests.update_pr(number: existing.fetch("number"), title: title, body: body)
         return pr_result("updated", updated)
       end
 
       created = @pull_requests.create_pr(branch: branch, base_branch: base_branch, title: title, body: body)
       pr_result("created", created)
+    end
+
+    def assert_bot_authored_pr!(pr, branch)
+      return if pr.dig("user", "login") == BOT_LOGIN && pr.dig("user", "type") == "Bot"
+
+      fail Error, "refusing to update existing PR for #{branch}; PR author is not #{BOT_LOGIN}"
     end
 
     def pr_result(action, pr)

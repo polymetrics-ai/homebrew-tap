@@ -52,6 +52,32 @@ class PMFormulaPRTest < Minitest::Test
     end
   end
 
+  def test_git_and_pull_request_clients_require_explicit_app_token
+    git_error = assert_raises(PMFormulaPR::Error) do
+      PMFormulaPR::Git.new(root: ROOT, push_token: "")
+    end
+    pr_error = assert_raises(PMFormulaPR::Error) do
+      PMFormulaPR::PullRequestClient.new(token: "")
+    end
+
+    assert_match(/PM_BRANCH_PUSH_TOKEN is required/, git_error.message)
+    assert_match(/PM_BRANCH_PUSH_TOKEN is required/, pr_error.message)
+  end
+
+  def test_clients_pass_app_token_without_ambient_github_token_fallback
+    git_client = PMFormulaPR::Git.new(root: ROOT, push_token: "app-token")
+    pull_requests = PMFormulaPR::PullRequestClient.new(token: "app-token")
+
+    git_env = git_client.push_env
+    gh_env = pull_requests.send(:gh_env)
+
+    assert_equal "AUTHORIZATION: basic #{Base64.strict_encode64("x-access-token:app-token")}",
+                 git_env.fetch("GIT_CONFIG_VALUE_0")
+    assert_equal "", git_env.fetch("GIT_CONFIG_VALUE_1")
+    assert_equal "app-token", gh_env.fetch("GH_TOKEN")
+    assert_nil gh_env.fetch("GITHUB_TOKEN")
+  end
+
   def test_duplicate_dispatch_reuses_exact_bot_branch_and_updates_existing_pr
     with_work_repo("current") do |work, _remote|
       prs = FakePullRequests.new
@@ -167,6 +193,7 @@ class PMFormulaPRTest < Minitest::Test
           "state" => "open",
           "title" => "old title",
           "body" => "old body",
+          "user" => bot_pr_user,
         },
       ])
 
@@ -179,6 +206,32 @@ class PMFormulaPRTest < Minitest::Test
       assert_empty prs.created
       assert_equal [42], prs.updated.map { |pr| pr.fetch("number") }
       assert_match(/verified the immutable upstream release evidence/, prs.all.first.fetch("body"))
+    end
+  end
+
+  def test_human_authored_existing_open_pr_for_branch_is_refused
+    with_work_repo("current") do |work, _remote|
+      branch = PMFormulaPR.branch_for(NEXT_METADATA)
+      existing_sha = create_formula_branch(work, branch, NEXT_METADATA, bot: true)
+      prs = FakePullRequests.new([
+        {
+          "number" => 42,
+          "html_url" => "https://github.com/polymetrics-ai/homebrew-tap/pull/42",
+          "head" => { "ref" => branch },
+          "base" => { "ref" => PMFormulaPR::BASE_BRANCH },
+          "state" => "open",
+          "title" => "old title",
+          "body" => "old body",
+          "user" => { "login" => "human-maintainer", "type" => "User" },
+        },
+      ])
+
+      error = assert_raises(PMFormulaPR::Error) { prepare(work, NEXT_METADATA, prs) }
+
+      assert_match(/PR author is not pm-homebrew-pr-bot\[bot\]/, error.message)
+      assert_equal existing_sha, remote_head(work, branch)
+      assert_empty prs.created
+      assert_empty prs.updated
     end
   end
 
@@ -236,6 +289,7 @@ class PMFormulaPRTest < Minitest::Test
         "state" => "open",
         "title" => title,
         "body" => body,
+        "user" => bot_pr_user,
       }
       @next_number += 1
       @prs << pr
@@ -258,18 +312,33 @@ class PMFormulaPRTest < Minitest::Test
     def deep_copy(object)
       JSON.parse(JSON.generate(object))
     end
+
+    def bot_pr_user
+      {
+        "login" => PMFormulaPR::BOT_LOGIN,
+        "type" => "Bot",
+      }
+    end
   end
 
   def prepare(work, metadata, prs, verification_overrides: {})
     metadata_path = metadata_file(metadata)
     verification_path = verification_file(metadata, verification_overrides: verification_overrides)
-    PMFormulaPR::Operations.new(root: work, pull_requests: prs).prepare(
+    git_client = PMFormulaPR::Git.new(root: work, push_token: "test-app-token")
+    PMFormulaPR::Operations.new(root: work, git: git_client, pull_requests: prs).prepare(
       metadata_path: metadata_path,
       verification_path: verification_path,
       repository: PMFormulaPR::TARGET_REPOSITORY,
       remote: "origin",
       base_branch: PMFormulaPR::BASE_BRANCH,
     )
+  end
+
+  def bot_pr_user
+    {
+      "login" => PMFormulaPR::BOT_LOGIN,
+      "type" => "Bot",
+    }
   end
 
   def with_work_repo(fixture)
