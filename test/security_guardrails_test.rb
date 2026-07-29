@@ -9,9 +9,11 @@ class SecurityGuardrailsTest < Minitest::Test
   README = File.join(ROOT, "README.md").freeze
   AUTH_WORKFLOW = File.join(ROOT, ".github/workflows/pull-request-authorization.yml").freeze
   HOMEBREW_WORKFLOW = File.join(ROOT, ".github/workflows/homebrew.yml").freeze
+  PM_RELEASE_DRY_RUN_WORKFLOW = File.join(ROOT, ".github/workflows/pm-release-dry-run.yml").freeze
   CODEOWNERS = File.join(ROOT, ".github/CODEOWNERS").freeze
   AUTHORIZATION_CONCURRENCY_GROUP = 'pull-request-authorization-\$\{\{ github\.event\.pull_request\.number \}\}'
   HOMEBREW_CONCURRENCY_GROUP = 'homebrew-validation-\$\{\{ github\.ref \}\}'
+  PM_RELEASE_DRY_RUN_CONCURRENCY_GROUP = 'pm-release-dry-run-\$\{\{ inputs\.version \}\}'
 
   FORBIDDEN_WORKFLOW_WRITE_PERMISSIONS = %w[
     actions
@@ -39,12 +41,13 @@ class SecurityGuardrailsTest < Minitest::Test
   def setup
     @auth_text = File.read(AUTH_WORKFLOW)
     @homebrew_text = File.read(HOMEBREW_WORKFLOW)
+    @dry_run_text = File.read(PM_RELEASE_DRY_RUN_WORKFLOW)
     @formula_text = File.read(FORMULA)
     @readme_text = File.read(README)
   end
 
   def test_workflows_are_valid_yaml
-    [AUTH_WORKFLOW, HOMEBREW_WORKFLOW].each do |workflow|
+    [AUTH_WORKFLOW, HOMEBREW_WORKFLOW, PM_RELEASE_DRY_RUN_WORKFLOW].each do |workflow|
       assert_kind_of Hash, YAML.safe_load_file(workflow, aliases: false), "#{workflow} should parse as YAML"
     end
   end
@@ -105,13 +108,63 @@ class SecurityGuardrailsTest < Minitest::Test
     refute_includes @homebrew_text, "github.event.pull_request"
     refute_includes @homebrew_text, "github.event_name"
     assert_includes @homebrew_text, "ruby test/security_guardrails_test.rb"
+    assert_includes @homebrew_text, "ruby test/pm_release_verifier_test.rb"
     assert_includes @homebrew_text, "PM source build (${{ matrix.label }})"
     assert_match(/^    timeout-minutes: 60$/, @homebrew_text)
     assert_concurrency_group @homebrew_text, HOMEBREW_CONCURRENCY_GROUP
   end
 
+  def test_pm_release_dry_run_workflow_is_manual_read_only_and_non_mutating
+    assert_includes @dry_run_text, "name: PM release dry-run verification"
+    assert_match(/^  workflow_dispatch:$/, @dry_run_text)
+    refute_match(/^\s+push:/, @dry_run_text)
+    refute_match(/^\s+pull_request:/, @dry_run_text)
+    refute_match(/^\s+pull_request_target:/, @dry_run_text)
+    assert_match(/^permissions:\n  attestations: read\n  contents: read\n/m, @dry_run_text)
+    assert_match(/^    permissions:\n      attestations: read\n      contents: read\n/m, @dry_run_text)
+    assert_concurrency_group @dry_run_text, PM_RELEASE_DRY_RUN_CONCURRENCY_GROUP, cancel_in_progress: false
+
+    (FORBIDDEN_WORKFLOW_WRITE_PERMISSIONS + %w[pull-requests]).each do |permission|
+      refute_match(/^\s+#{Regexp.escape(permission)}:\s*write\b/, @dry_run_text,
+                   "#{permission}: write must not be granted")
+    end
+
+    %w[git\ push git\ commit gh\ pr gh\ release gh\ secret gh\ variable].each do |forbidden|
+      refute_match(/#{forbidden}/, @dry_run_text)
+    end
+    assert_includes @dry_run_text, "ruby scripts/pm_release_verifier.rb verify"
+    assert_match(%r{uses:\s+sigstore/cosign-installer@d7543c93d881b35a8faa02e8e3605f69b7a1ce62\b}, @dry_run_text)
+    assert_includes @dry_run_text, "cosign-release: v2.6.4"
+    assert_includes @dry_run_text, "gh attestation verify --help"
+    %w[
+      --cert-identity
+      --cert-oidc-issuer
+      --deny-self-hosted-runners
+      --format
+      --limit
+      --predicate-type
+      --source-digest
+      --source-ref
+    ].each do |flag|
+      assert_includes @dry_run_text, flag
+    end
+    refute_includes @dry_run_text, "--signer-workflow"
+    assert_includes @dry_run_text, "Dry-run verifier mutated tracked repository files."
+  end
+
+  def test_pm_release_dry_run_shell_uses_environment_for_untrusted_inputs
+    %w[dispatch_schema source_repo version release_id source_run_id target_commitish_policy].each do |input|
+      assert_includes @dry_run_text, "${{ inputs.#{input} }}"
+    end
+
+    run_blocks = @dry_run_text.scan(/^\s+run: \|\n(?<body>(?:^\s{10}.*\n?)+)/).flatten.join("\n")
+    refute_includes run_blocks, "${{ inputs."
+    assert_includes run_blocks, '--version "${PM_VERSION}"'
+    assert_includes run_blocks, '--release-id "${PM_RELEASE_ID}"'
+  end
+
   def test_all_referenced_actions_are_pinned_to_full_commit_shas
-    workflow_text = [@auth_text, @homebrew_text].join("\n")
+    workflow_text = [@auth_text, @homebrew_text, @dry_run_text].join("\n")
     uses_lines = workflow_text.lines.grep(/^\s*uses:/)
 
     refute_empty uses_lines
@@ -159,7 +212,7 @@ class SecurityGuardrailsTest < Minitest::Test
     match[1]
   end
 
-  def assert_concurrency_group(workflow_text, group_pattern)
-    assert_match(/^concurrency:\n  group: "#{group_pattern}"\n  cancel-in-progress: true$/m, workflow_text)
+  def assert_concurrency_group(workflow_text, group_pattern, cancel_in_progress: true)
+    assert_match(/^concurrency:\n  group: "#{group_pattern}"\n  cancel-in-progress: #{cancel_in_progress}$/m, workflow_text)
   end
 end

@@ -37,6 +37,7 @@ jobs:
         run: |
           ruby test/security_guardrails_test.rb
           ruby test/pm_formula_bump_test.rb
+          ruby test/pm_release_verifier_test.rb
 
       - name: Set up Homebrew on Linux
         if: runner.os == 'Linux'
